@@ -54,8 +54,8 @@ Three findings worth recording, each of which cost a wrong hypothesis:
 ## Prerequisites & Installation
 
 * **Node.js >= 20.0.0** (native `node:sqlite` and global `fetch` support; zero npm dependencies).
-* **[Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent)** (`pi`).
-* **[Gentle AI](https://github.com/gentle-ai/gentle-pi)** (`gentle-pi`).
+* **[Pi Coding Agent](https://github.com/earendil-works/pi)** (`pi`).
+* **[Gentle AI](https://github.com/Gentleman-Programming/gentle-pi)** (`gentle-pi`).
 * Platform support: Linux, WSL2, macOS. See [docs/OS-COMPATIBILITY.md](docs/OS-COMPATIBILITY.md) for OS-specific details.
 
 ```bash

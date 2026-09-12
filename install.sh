@@ -93,7 +93,7 @@ elif [[ -d "$HOME/.pi/agent" ]]; then
   PI_FOUND=true
 else
   warn "Pi Coding Agent not found on PATH or at ~/.pi/agent."
-  warn "Install Pi Coding Agent first: https://github.com/earendil-works/pi-coding-agent"
+  warn "Install Pi Coding Agent first: https://github.com/earendil-works/pi"
 fi
 
 # --- 3. Validate Gentle AI harness ---
@@ -114,7 +114,7 @@ if [[ "$GENTLE_FOUND" != "true" ]]; then
   warn "Gentle AI (gentle-pi) was not detected in your Pi setup."
   warn "To install Gentle AI harness, run:"
   warn "  pi install npm:gentle-pi"
-  warn "or see: https://github.com/gentle-ai/gentle-pi"
+  warn "or see: https://github.com/Gentleman-Programming/gentle-pi"
 fi
 
 # --- 4. Detect Platform & OS Nuances ---
