@@ -234,6 +234,10 @@ export function humanReset(seconds) {
  * @returns {QuotaResult}
  */
 export function degradedResult(input) {
+  const notConfigured = Boolean(
+    input.notConfigured ??
+      (typeof input.error === "string" && input.error.startsWith("no ") && input.error.includes("credential in the Pi store")),
+  );
   return {
     family: input.family,
     label: input.label,
@@ -242,6 +246,7 @@ export function degradedResult(input) {
     windows: input.windows ?? [],
     error: input.error,
     ok: false,
+    notConfigured,
     updatedAt: new Date(input.now ?? Date.now()).toISOString(),
     source: input.source,
     expiresInMin: input.expiresInMin ?? null,

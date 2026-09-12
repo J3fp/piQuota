@@ -49,8 +49,13 @@ export function headlineWindow(provider) {
  * @returns {string}
  */
 export function renderStatusLine(providers, paint) {
+  const active = providers.filter(
+    (provider) => !provider.notConfigured && !provider.error?.includes("no credential in the Pi store"),
+  );
+  if (active.length === 0) return paint("dim", "quota: no configured providers");
+
   const parts = [];
-  for (const provider of providers) {
+  for (const provider of active) {
     const short = FAMILY_SHORT[provider.family] ?? provider.family.slice(0, 1).toUpperCase();
     const window = headlineWindow(provider);
     const remaining = window?.remainingPercent ?? null;

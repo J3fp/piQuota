@@ -299,3 +299,75 @@ test("the first paint says loading, not unavailable", async () => {
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.match(plain(harness.widgets.at(-1)[0]), /Claude:○ 4%/);
 });
+
+test("unconfigured providers are omitted from the editor line and summary", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness({
+    report: {
+      generatedAt: "2030-01-01T00:00:00.000Z",
+      sources: ["/tmp/auth.json"],
+      warnings: [],
+      providers: [
+        {
+          family: "claude",
+          label: "Claude (Pi)",
+          primaryWindowId: "5h",
+          account: "fixture@example.com",
+          plan: null,
+          windows: [{ id: "5h", label: "5h", usedPercent: 10, remainingPercent: 90, resetsAt: null, resetsInSec: 3600, note: null }],
+          error: null,
+          ok: true,
+          updatedAt: "2030-01-01T00:00:00.000Z",
+          expiresInMin: 60,
+        },
+        {
+          family: "codex",
+          label: "Codex (Pi)",
+          primaryWindowId: "5h",
+          account: "fixture@example.com",
+          plan: "plus",
+          windows: [{ id: "5h", label: "5h", usedPercent: 5, remainingPercent: 95, resetsAt: null, resetsInSec: 3600, note: null }],
+          error: null,
+          ok: true,
+          updatedAt: "2030-01-01T00:00:00.000Z",
+          expiresInMin: 60,
+        },
+        {
+          family: "antigravity",
+          label: "Antigravity (Pi)",
+          primaryWindowId: null,
+          account: "unknown",
+          plan: null,
+          windows: [],
+          error: "no antigravity credential in the Pi store",
+          ok: false,
+          notConfigured: true,
+          updatedAt: "2030-01-01T00:00:00.000Z",
+          expiresInMin: null,
+        },
+        {
+          family: "opencode-go",
+          label: "OpenCode Go (Pi)",
+          primaryWindowId: null,
+          account: "unknown",
+          plan: null,
+          windows: [],
+          error: "no opencode-go credential in the Pi store",
+          ok: false,
+          notConfigured: true,
+          updatedAt: "2030-01-01T00:00:00.000Z",
+          expiresInMin: null,
+        },
+      ],
+    },
+  });
+  module.default(harness.pi);
+  await startSession(harness);
+
+  const visible = plain(harness.widgets.at(-1)[0]);
+  // When only Claude and Codex are in auth.json, only those two appear!
+  assert.match(visible, /Claude:○ 10%/);
+  assert.match(visible, /Codex:○ 5%/);
+  assert.equal(visible.includes("Agy"), false, "unconfigured Antigravity must not appear in the line");
+  assert.equal(visible.includes("OP-Go"), false, "unconfigured OpenCode Go must not appear in the line");
+});

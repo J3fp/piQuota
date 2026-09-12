@@ -58,6 +58,14 @@ Three findings worth recording, each of which cost a wrong hypothesis:
 * **[Gentle AI](https://github.com/Gentleman-Programming/gentle-pi)** (`gentle-pi`).
 * Platform support: Linux, WSL2, macOS. See [docs/OS-COMPATIBILITY.md](docs/OS-COMPATIBILITY.md) for OS-specific details.
 
+### 1-Line Quick Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/J3fp/piQuota/main/install.sh | bash
+```
+
+### Manual Install / Development
+
 ```bash
 git clone https://github.com/J3fp/piQuota.git
 cd piQuota
@@ -128,6 +136,9 @@ Claude:○ 0%  Codex:○ 8%  Agy:○ 4%  OP-Go:○ 4%
 * the numbers are **used**, not remaining, and the semaphore is both colour and
   shape (`○` plenty left → `◔` → `◕` → `●` nearly spent), so it still reads on a
   colourblind or mono terminal;
+* **only active providers are shown:** if you only have Claude and Codex configured
+  in Pi, only Claude and Codex appear in the line and on Moshi (no empty warning
+  icons for providers you don't use);
 * `NO_COLOR` / `TERM=dumb` drops the colours and keeps the glyphs;
 * the window shown is the **shortest** one (5h first), and `/quota` expands every
   window with a used-fraction bar and the reset countdown.

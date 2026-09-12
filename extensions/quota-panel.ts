@@ -50,6 +50,7 @@ type QuotaProvider = {
   windows: QuotaWindow[];
   error: string | null;
   ok: boolean;
+  notConfigured?: boolean;
   updatedAt: string;
   expiresInMin: number | null;
 };
@@ -196,7 +197,14 @@ function humanDuration(seconds: number): string {
  *   Claude:○ 0%   Codex:○ 8%   Agy:○ 4%   OP-Go:○ 3%
  */
 function renderLine(report: QuotaReport, theme: Theme): string {
-  const tokens = report.providers.map((provider) => {
+  // Only display providers that are configured in Pi.
+  // A provider that is simply not configured does not belong in the editor line.
+  const active = report.providers.filter(
+    (provider) => !provider.notConfigured && !provider.error?.includes("no credential in the Pi store"),
+  );
+  if (active.length === 0) return theme.fg("dim", "quota: no providers configured in Pi");
+
+  const tokens = active.map((provider) => {
     const name = paint(BRAND[provider.family] ?? "#8B949E", `${SHORT_NAME[provider.family] ?? provider.family}:`);
     if (!provider.ok) return `${name}${theme.fg("error", "!")}`;
 
@@ -212,7 +220,14 @@ function renderLine(report: QuotaReport, theme: Theme): string {
 /** The detailed panel: every window, with a used-fraction bar. */
 function renderPanel(report: QuotaReport, theme: Theme): string[] {
   const lines: string[] = [];
-  for (const provider of report.providers) {
+  const active = report.providers.filter(
+    (provider) => !provider.notConfigured && !provider.error?.includes("no credential in the Pi store"),
+  );
+  const unconfigured = report.providers.filter(
+    (provider) => provider.notConfigured || provider.error?.includes("no credential in the Pi store"),
+  );
+
+  for (const provider of active) {
     const name = paint(BRAND[provider.family] ?? "#8B949E", provider.label);
     const meta = [provider.account];
     if (provider.plan) meta.push(`plan ${provider.plan}`);
@@ -252,6 +267,10 @@ function renderPanel(report: QuotaReport, theme: Theme): string[] {
     }
   }
   lines.push(theme.fg("dim", `used % · read-only · ${report.generatedAt}`));
+  if (unconfigured.length > 0) {
+    const names = unconfigured.map((p) => SHORT_NAME[p.family] ?? p.family).join(", ");
+    lines.push(theme.fg("dim", `not configured in Pi: ${names}`));
+  }
   for (const warning of report.warnings.slice(0, 3)) {
     lines.push(theme.fg("warning", `warn: ${warning}`));
   }
@@ -424,7 +443,10 @@ export default function quotaPanelExtension(pi: ExtensionAPI): void {
       ctx.ui.notify(`Quota unavailable: ${lastError}`, "error");
       return;
     }
-    const summary = report.providers
+    const active = report.providers.filter(
+      (provider) => !provider.notConfigured && !provider.error?.includes("no credential in the Pi store"),
+    );
+    const summary = active
       .map((provider) => {
         const name = SHORT_NAME[provider.family] ?? provider.family;
         if (!provider.ok) return `${name}: unavailable`;
@@ -432,7 +454,7 @@ export default function quotaPanelExtension(pi: ExtensionAPI): void {
         return `${name}: ${used === null ? "n/a" : `${Math.round(used)}% used`}`;
       })
       .join(" · ");
-    ctx.ui.notify(summary, "info");
+    ctx.ui.notify(summary || "No active providers configured in Pi", "info");
   };
 
   pi.registerCommand("quota", {

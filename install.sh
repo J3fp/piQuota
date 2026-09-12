@@ -15,7 +15,21 @@
 
 set -euo pipefail
 
-HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd 2>/dev/null || pwd)"
+
+# Detect if running from a pipe/curl (no local repo files present)
+if [[ ! -f "${HERE:-}/package.json" ]]; then
+  echo "Downloading pi-quota from GitHub..."
+  TMP_DIR="$(mktemp -d /tmp/pi-quota-install-XXXXXX)"
+  trap 'rm -rf "$TMP_DIR"' EXIT
+  if command -v git >/dev/null 2>&1; then
+    git clone --depth 1 https://github.com/J3fp/piQuota.git "$TMP_DIR" >/dev/null 2>&1
+  else
+    curl -fsSL https://github.com/J3fp/piQuota/archive/refs/heads/main.tar.gz | tar -xz -C "$TMP_DIR" --strip-components=1
+  fi
+  exec bash "$TMP_DIR/install.sh" "$@"
+fi
+
 PREFIX="${PI_QUOTA_PREFIX:-$HOME/.local/share/pi-quota}"
 BIN_DIR="${PI_QUOTA_BIN_DIR:-$HOME/.local/bin}"
 EXT_DIR="${PI_QUOTA_EXT_DIR:-$HOME/.pi/agent/extensions}"
