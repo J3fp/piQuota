@@ -170,7 +170,7 @@ else
   rm -rf "$PREFIX"
   mkdir -p "$PREFIX"
   cp -R "$HERE/src" "$HERE/bin" "$PREFIX/"
-  cp "$HERE/package.json" "$PREFIX/"
+  cp "$HERE/package.json" "$HERE/LICENSE" "$PREFIX/"
   log "copied project to $PREFIX"
 fi
 

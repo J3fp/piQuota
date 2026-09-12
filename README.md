@@ -37,7 +37,7 @@ shuvquota, and it never writes to a credential file.
   | Path | What |
   | --- | --- |
   | `~/.cache/pi-quota/usage.json` | the report cache |
-| `~/.cache/pi-quota/refresh-state.json` | each family's own refresh clock |
+  | `~/.cache/pi-quota/refresh-state.json` | each family's own refresh clock |
   | `~/.cache/pi-quota/last-published.json`, `last-good.json`, `backoff.json` | sticky snapshots and throttle state |
   | `~/.local/state/pi-quota/moshi-usage.json` | the local Moshi-shaped artifact |
   | `~/.local/state/pi-quota/moshi-takeover.json` | only after `piquota moshi takeover` |
@@ -366,7 +366,7 @@ extensions/moshi-approvals.ts  mirrors Pi's approval prompts to the phone
 ## Tests
 
 ```bash
-node --test tests/*.test.mjs     # 182 tests, fake tokens only, no network
+node --test tests/*.test.mjs     # 188 tests, fake tokens only, no network
 ```
 
 Modules covered: `auth.json` parsing and de-duplication, the Claude Code store
@@ -377,7 +377,8 @@ strategies, the Firefox cookie reader against a synthetic SQLite database, the
 Antigravity refresh (in-memory only), the Moshi takeover and daemon-restart
 helpers, the Moshi payload/redaction/transport, the renderers, the Pi
 extension contract, the approval mirror (through a real Unix socket), the per-family
-refresh clocks, and argument parsing including the two silent defects it once hid.
+refresh clocks, argument parsing including the two silent defects it once hid, and the
+structure of these documents themselves (tables, fences, links, anchors).
 
 ## Acknowledgments & Prior Art
 
