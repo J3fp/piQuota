@@ -40,6 +40,7 @@ const PERMISSION_EVENT = "pi-permission-system:permission-request";
 const agentSource = "pi";
 const agentDisplayName = "Pi";
 
+
 interface TerminalContext {
   terminalKind: string;
   tmuxSession: string;
@@ -329,8 +330,9 @@ export default function moshiApprovals(pi: ExtensionAPI): void {
             category: "approval_required",
             toolName,
             title: agentDisplayName + " needs approval",
-            // Remote approval depends on the daemon's TUI bridge being able to
-            // reach this pane, which is not guaranteed, so the card never promises it.
+            // Remote approval only lands when the daemon can re-find this prompt on
+            // screen, which it does about one time in eight. The card never promises
+            // more than that.
             subtitle: "Answer in terminal",
             message: firstString(payload.message).trim().replace(/\s+/g, " ").slice(0, 256),
           }),

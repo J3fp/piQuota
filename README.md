@@ -254,11 +254,46 @@ overwrite any patch made in place.
   lets the daemon address the pane.
 
 Verified without Pi: the tests run a **real Unix socket** and assert the bytes that
-arrive, and the resolved socket path is checked against the one the daemon logs. Two
-honest limits: the card says *"Answer in terminal"*, because remote approval depends
-on the daemon's TUI bridge reaching that pane and is not guaranteed; and this covers
-gentle-pi's guarded-command confirm, the only approval source verified to emit the
-event.
+arrive, and the resolved socket path is checked against the one the daemon logs. This
+covers gentle-pi's guarded-command confirm, the only approval source verified to emit
+the event.
+
+### Answering the card from the phone does not reliably work, and that is not fixable here
+
+The card arrives, and the whole round trip works: the daemon opens a pending action
+and the phone's answer comes back carrying the right `actionId`. What fails is the
+daemon's own verification, in its own words:
+
+```
+tui bridge: pending-action.open sent   actionId=ca0f8118… source=pi
+tui bridge: remote action executed     type=action.approve status=sent
+tui bridge: remote action verification failed
+  reason="approval fingerprint no longer present on screen"
+```
+
+Measured over eight attempts on a live session: **1 applied, 7 came back with
+`approval fingerprint no longer present on screen`.** The daemon fingerprints the pane
+when the request arrives and re-checks that the same screen is still there when the
+answer does. Something on Pi's screen always moves in between.
+
+Two causes were tested and **rejected**, and both are worth recording so nobody
+repeats them:
+
+| Hypothesis | Test | Result |
+| --- | --- | --- |
+| The quota line redraws the pane every 60 s and invalidates the fingerprint | `/quota hide`, then approve | failed again |
+| The envelope is sent before Pi has drawn the prompt, so the daemon fingerprints an empty screen | hold the write 400 ms, then 2500 ms | failed both times |
+
+The remaining explanation is the one nothing here can change: Pi's TUI animates while
+the agent is blocked — a working indicator, at minimum — and the daemon compares exact
+captures, so a match is luck. `moshi-hook` is closed source, exposes no setting to relax
+the check, and offers no way to learn about a phone decision outside that bridge.
+
+So the card is a **notification that Pi is waiting**, not a remote control, and its
+subtitle says exactly that. Answer in the terminal. For these measurements the daemon
+ran with verbose logging, which reported `approvals.answer`, `terminal.prompt` and
+`terminal.keys` as supported capabilities — the limitation is the verification, not the
+transport.
 
 ## Moshi: real cards in the Usages tab
 

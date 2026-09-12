@@ -114,21 +114,23 @@ async function load(env) {
   return { ...harness, restore: () => Object.assign(process.env, previous) };
 }
 
-test("the extension registers on Pi's own event bus, for the channel gentle-pi emits", async () => {
+test("the extension registers on Pi's own event bus, for the channel gentle-pi emits", async (t) => {
   const server = await makeSocketServer();
+  t.after(() => server.close());
   const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
 
   assert.equal(typeof loaded.pi.default === "undefined", true);
   assert.equal(loaded.listeners.has(PERMISSION_EVENT), true, "the emitted channel must be the one subscribed");
   assert.equal(loaded.forbidden.length, 0, "a mirroring extension must not touch context or commands");
 
-  loaded.restore();
-  await server.close();
 });
 
-test("a waiting approval is mirrored with the shape moshi-hook already parses", async () => {
+test("a waiting approval is mirrored with the shape moshi-hook already parses", async (t) => {
   const server = await makeSocketServer();
+  t.after(() => server.close());
   const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
 
   await loaded.handlers.get("session_start")({}, loaded.ctx);
   await loaded.listeners.get(PERMISSION_EVENT)({
@@ -162,14 +164,14 @@ test("a waiting approval is mirrored with the shape moshi-hook already parses", 
   assert.equal(envelope.contextRemaining, 88);
   assert.equal(typeof envelope.requestedAt, "string");
 
-  loaded.restore();
-  await server.close();
 });
 
-test("both decisions clear the card, and neither is reported as still waiting", async () => {
+test("both decisions clear the card, and neither is reported as still waiting", async (t) => {
   for (const state of ["approved", "denied"]) {
     const server = await makeSocketServer();
+  t.after(() => server.close());
     const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
     await loaded.handlers.get("session_start")({}, loaded.ctx);
 
     await loaded.listeners.get(PERMISSION_EVENT)({ requestId: `req-${state}`, state: "waiting", toolName: "bash" });
@@ -190,8 +192,9 @@ test("both decisions clear the card, and neither is reported as still waiting", 
   }
 });
 
-test("the terminal target travels with the envelope, so the daemon can address the pane", async () => {
+test("the terminal target travels with the envelope, so the daemon can address the pane", async (t) => {
   const server = await makeSocketServer();
+  t.after(() => server.close());
   const loaded = await load({
     MOSHI_SOCKET_PATH: server.path,
     HERDR_ENV: "1",
@@ -217,13 +220,13 @@ test("the terminal target travels with the envelope, so the daemon can address t
   assert.equal(envelope.herdrTabId, "w8:t1");
   assert.equal(envelope.herdrSession, "herdr-1");
 
-  loaded.restore();
-  await server.close();
 });
 
-test("an approval before any session event still produces a usable envelope", async () => {
+test("an approval before any session event still produces a usable envelope", async (t) => {
   const server = await makeSocketServer();
+  t.after(() => server.close());
   const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
 
   await loaded.listeners.get(PERMISSION_EVENT)({ requestId: "req-3", state: "waiting", toolName: "bash" });
   await new Promise((resolve) => setTimeout(resolve, 120));
@@ -233,13 +236,13 @@ test("an approval before any session event still produces a usable envelope", as
   assert.ok(server.received[0].sessionId.length > 0, "a session id is always present so the card is addressable");
   assert.equal(server.received[0].eventName, "PermissionRequest");
 
-  loaded.restore();
-  await server.close();
 });
 
-test("unknown or malformed payloads are ignored instead of crashing the turn", async () => {
+test("unknown or malformed payloads are ignored instead of crashing the turn", async (t) => {
   const server = await makeSocketServer();
+  t.after(() => server.close());
   const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
   const listener = loaded.listeners.get(PERMISSION_EVENT);
 
   assert.doesNotThrow(() => listener(undefined));
@@ -251,13 +254,12 @@ test("unknown or malformed payloads are ignored instead of crashing the turn", a
 
   assert.equal(server.received.length, 0, "nothing is invented for a payload we do not understand");
 
-  loaded.restore();
-  await server.close();
 });
 
-test("an absent daemon is silent: the hook never interrupts the user's turn", async () => {
+test("an absent daemon is silent: the hook never interrupts the user's turn", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-quota-approvals-"));
   const loaded = await load({ MOSHI_SOCKET_PATH: join(dir, "nothing-here.sock") });
+  t.after(() => loaded.restore());
 
   assert.doesNotThrow(() =>
     loaded.listeners.get(PERMISSION_EVENT)({ requestId: "req-4", state: "waiting", toolName: "bash" }),
@@ -267,9 +269,11 @@ test("an absent daemon is silent: the hook never interrupts the user's turn", as
   loaded.restore();
 });
 
-test("the envelope never carries credential material", async () => {
+test("the envelope never carries credential material", async (t) => {
   const server = await makeSocketServer();
+  t.after(() => server.close());
   const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
   await loaded.handlers.get("session_start")({}, loaded.ctx);
 
   await loaded.listeners.get(PERMISSION_EVENT)({
@@ -285,13 +289,13 @@ test("the envelope never carries credential material", async () => {
     assert.equal(raw.includes(secret), false, `the envelope leaked ${secret}`);
   }
 
-  loaded.restore();
-  await server.close();
 });
 
-test("session_shutdown drops the cached session so a later approval cannot reuse it", async () => {
+test("session_shutdown drops the cached session so a later approval cannot reuse it", async (t) => {
   const server = await makeSocketServer();
+  t.after(() => server.close());
   const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
 
   await loaded.handlers.get("session_start")({}, loaded.ctx);
   await loaded.handlers.get("session_shutdown")({}, loaded.ctx);
@@ -302,6 +306,7 @@ test("session_shutdown drops the cached session so a later approval cannot reuse
   assert.notEqual(envelope.sessionId, "session-abc", "a closed session must not be reused");
   assert.notEqual(envelope.cwd, "/work/piQuota");
 
-  loaded.restore();
-  await server.close();
 });
+
+
+

@@ -173,7 +173,7 @@ These are two different channels, and only one of them used to work.
 | Session started / task complete / session ended | moshi-hook's generated Pi extension | Yes |
 | Chat View state (model, context, cwd, pane) | same | Yes |
 | Rate-limit notices from Claude Code | `pi-claude-code-provider`, via `ctx.ui.notify` | No — they are in-Terminal by design |
-| **Approvals** | gentle-pi's guarded-command confirm | **Not until the approval mirror is installed** |
+| **Approvals** | gentle-pi's guarded-command confirm | As a notification, once the mirror is installed. Answering *from the phone* lands about one time in eight; see the README. |
 
 The gap: gentle-pi emits `pi-permission-system:permission-request` on Pi's extension
 event bus and nothing listens. moshi-hook's generated extension has the envelope
