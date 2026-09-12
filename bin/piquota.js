@@ -1,0 +1,616 @@
+#!/usr/bin/env node
+/**
+ * piquota — independent, read-only quota for the credentials Pi already owns.
+ *
+ *   piquota                      panel for Claude, Codex, Antigravity, OpenCode Go
+ *   piquota --json               normalized report
+ *   piquota --compact | --status | --explain
+ *   piquota auth opencode        open the OpenCode login and capture the session
+ *   piquota auth status          show which credential sources are reachable
+ *   piquota moshi push           publish the quota to the paired Moshi host
+ *   piquota moshi watch          keep publishing on an interval
+ *   piquota moshi artifact       write the local Moshi-shaped artifact
+ *   piquota moshi service ...    install/remove the user service that runs `moshi watch`
+ */
+
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { collectQuota, FAMILIES } from "../src/engine.js";
+import { clearCache, describeCache, resolveCachePath, withCache } from "../src/cache.js";
+import { parseArgs } from "../src/cli/args.js";
+import { ansiPalette } from "../src/render/theme.js";
+import { renderCompact, renderPanel, renderStatusLine } from "../src/render/panel.js";
+import { describeStore, loadPiCredentials, resolveAuthPaths } from "../src/auth/pi-auth.js";
+import { redact } from "../src/http.js";
+import { humanReset } from "../src/model.js";
+import { discoverCookieStores, findCookie } from "../src/browser/cookies.js";
+import { OPENCODE_COOKIE_NAME, configPaths, discoverWorkspaceId, readGoPlan, resolveCookie, writeSecretFile } from "../src/opencode/session.js";
+import { buildUsagePayload, discoverBaseUrl, moshiPaths, pushUsage, readHostCredentials } from "../src/moshi/client.js";
+import { buildArtifact, resolveArtifactPath, writeArtifact } from "../src/moshi/artifact.js";
+import { readUsageCollection } from "../src/moshi/settings.js";
+import { loadLastPublished, mergeLastGood, mergeSticky, saveLastPublished } from "../src/moshi/sticky.js";
+
+const VERSION = "0.2.0";
+const OPENCODE_LOGIN_URL = "https://opencode.ai/auth";
+const WINDOWS_FIREFOX = [
+  "/mnt/c/Program Files/Mozilla Firefox/firefox.exe",
+  "/mnt/c/Program Files (x86)/Mozilla Firefox/firefox.exe",
+];
+
+const FAMILY_ALIASES = {
+  claude: "claude",
+  anthropic: "claude",
+  codex: "codex",
+  "openai-codex": "codex",
+  chatgpt: "codex",
+  antigravity: "antigravity",
+  google: "antigravity",
+  agy: "antigravity",
+  "opencode-go": "opencode-go",
+  opencode: "opencode-go",
+  go: "opencode-go",
+  zen: "opencode-go",
+};
+
+const HELP = `piquota ${VERSION} — read-only quota from Pi's provider credentials
+
+Usage:
+  piquota [families...] [flags]
+  piquota auth <opencode|status> [flags]
+  piquota moshi <push|watch|artifact|status|service> [flags]
+
+Quota:
+  --json             Emit the normalized report as JSON
+  --compact, -c      One line per provider
+  --status           Single line with rings
+  --no-color         Disable ANSI colors
+  --no-cache         Skip the local cache
+  --force            Ignore a still-fresh cache entry
+  --ttl <seconds>    Cache TTL (default 60)
+  --timeout <ms>     Per-request timeout (default 15000)
+  --no-refresh       Never refresh Antigravity's token in memory
+  --explain          Show which stores/fields are read (names only)
+  --clear-cache      Delete the local cache and exit
+
+Auth (OpenCode Go session, the only credential Pi does not store):
+  piquota auth opencode            open the login in Firefox and capture the cookie
+  piquota auth opencode --paste    read the cookie from stdin instead
+  piquota auth opencode --no-browser
+                                   print the URL without launching a browser
+  piquota auth opencode --wait <s> how long to wait for the login (default 180)
+  piquota auth status              report every credential source
+
+Moshi:
+  piquota moshi push               publish once to the paired host channel
+  piquota moshi watch              publish every --interval seconds (default 60)
+  piquota moshi artifact           write the local artifact (--print to stdout)
+  piquota moshi status             host pairing and usage-collection state
+  piquota moshi service install    run \`moshi watch\` as a systemd user service
+  piquota moshi service uninstall  remove that service
+
+Guarantees:
+  * ~/.pi/agent/auth.json is opened read-only. Never written, synced or refreshed.
+  * Antigravity's access token may be refreshed in memory; it is never persisted.
+  * Browser cookie databases are copied and opened read-only; values are never logged.
+  * Only percentages, window labels, reset times and plan names leave this machine.
+`;
+
+/**
+ * @param {string[]} positionals
+ */
+function resolveFamilies(positionals) {
+  /** @type {string[]} */
+  const families = [];
+  /** @type {string[]} */
+  const unknown = [];
+  for (const positional of positionals) {
+    if (positional === "all") continue;
+    const family = FAMILY_ALIASES[positional.toLowerCase()];
+    if (!family) {
+      unknown.push(positional);
+      continue;
+    }
+    if (!families.includes(family)) families.push(family);
+  }
+  return { families, unknown };
+}
+
+/**
+ * @param {string[]} families
+ * @returns {string[]}
+ */
+function explainLines(families) {
+  const paths = resolveAuthPaths({});
+  const lines = ["", "Credential resolution:"];
+  if (paths.length === 0) {
+    lines.push("  no Pi auth store found (looked for $PI_AUTH_PATH, ~/.pi/agent/auth.json, /mnt/c/Users/*/.pi/agent/auth.json)");
+  }
+  for (const path of paths) {
+    const store = describeStore(path);
+    lines.push(`  store  ${path}  exists=${store.exists} file=${store.isFile} bytes=${store.sizeBytes ?? "?"}`);
+  }
+
+  const loaded = loadPiCredentials({});
+  const counts = new Map();
+  for (const credential of loaded.credentials) counts.set(credential.family, (counts.get(credential.family) ?? 0) + 1);
+  lines.push("  credentials: " + FAMILIES.map((family) => `${family}=${counts.get(family) ?? 0}`).join(" "));
+  lines.push("  fields read from auth.json: type, access, refresh, expires, accountId, projectId, email, key");
+  lines.push("  derived from the Codex JWT (payload only): chatgpt_account_id, chatgpt_plan_type, email");
+
+  const cookie = resolveCookie({});
+  lines.push(`  opencode.ai cookie: ${cookie.found ? `found via ${cookie.origin} (${cookie.detail})` : `not found (${cookie.detail})`}`);
+  lines.push(`  cache: ${resolveCachePath({})} (${describeCache({}).exists ? "present" : "absent"})`);
+  lines.push(`  families requested: ${families.join(", ")}`);
+  for (const warning of loaded.warnings) lines.push(`  warn: ${redact(warning)}`);
+  lines.push("");
+  return lines;
+}
+
+/**
+ * @param {string} text
+ */
+function out(text) {
+  process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+}
+
+/**
+ * @param {string} text
+ */
+function err(text) {
+  process.stderr.write(text.endsWith("\n") ? text : `${text}\n`);
+}
+
+/**
+ * Launch Firefox at the login URL. Returns how it was launched.
+ *
+ * @param {string} url
+ * @returns {{ launched: boolean, via: string, error?: string }}
+ */
+function openLogin(url) {
+  for (const candidate of WINDOWS_FIREFOX) {
+    if (!existsSync(candidate)) continue;
+    const result = spawnSync(candidate, [url], { stdio: "ignore", detached: true });
+    if (!result.error) return { launched: true, via: `Windows Firefox (${candidate})` };
+  }
+  for (const command of ["firefox", "firefox-esr", "firefox-bin"]) {
+    const result = spawnSync("which", [command], { encoding: "utf-8" });
+    if (result.status !== 0) continue;
+    const launched = spawnSync(command, [url], { stdio: "ignore", detached: true });
+    if (!launched.error) return { launched: true, via: `Firefox (${command})` };
+  }
+  return { launched: false, via: "none", error: "no Firefox binary found" };
+}
+
+/**
+ * @param {number} seconds
+ */
+function sleep(seconds) {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {Promise<number>}
+ */
+async function authOpenCode(argv) {
+  const paste = argv.includes("--paste");
+  const noBrowser = argv.includes("--no-browser");
+  const waitIndex = argv.indexOf("--wait");
+  const waitSeconds = waitIndex >= 0 ? Number(argv[waitIndex + 1]) || 180 : 180;
+
+  const paths = configPaths({});
+  out("OpenCode Go session");
+  out(`  config file: ${paths.path}`);
+
+  if (paste) {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const value = Buffer.concat(chunks).toString("utf-8").trim();
+    if (value === "") {
+      err("no cookie received on stdin");
+      return 2;
+    }
+    const written = writeSecretFile(paths.path, value);
+    if (!written.ok) {
+      err(`could not write ${paths.path}: ${written.error}`);
+      return 2;
+    }
+    out(`  stored (0600): ${paths.path}`);
+    return verifyGoPlan({});
+  }
+
+  const stores = discoverCookieStores({});
+  out("  browser stores found:");
+  if (stores.length === 0) {
+    out("    (none)");
+  }
+  for (const store of stores) {
+    const readable = store.readability === "plaintext";
+    out(`    ${readable ? "readable " : "ENCRYPTED"} ${store.browser} ${store.profile}`);
+    if (!readable && store.note) out(`              ${store.note}`);
+  }
+
+  const before = resolveCookie({ allowBrowser: false });
+  if (before.found) {
+    out(`  a session is already available via ${before.origin} (${before.detail})`);
+  }
+
+  const readableFirefox = stores.filter((store) => store.browser === "firefox" && store.readability === "plaintext");
+  if (readableFirefox.length === 0) {
+    err("");
+    err("No readable Firefox cookie store found. Log in with Firefox, or paste the cookie:");
+    err("  piquota auth opencode --paste   (get `auth` for opencode.ai from your browser devtools)");
+    return 2;
+  }
+
+  out("");
+  if (!noBrowser) {
+    const opened = openLogin(OPENCODE_LOGIN_URL);
+    out(opened.launched ? `  opened ${OPENCODE_LOGIN_URL} in ${opened.via}` : `  could not launch a browser (${opened.error})`);
+    if (!opened.launched) out(`  open manually: ${OPENCODE_LOGIN_URL}`);
+  } else {
+    out(`  open this URL in Firefox: ${OPENCODE_LOGIN_URL}`);
+  }
+  out("  log in with GitHub, Google or Apple, then click Authorize on the consent screen.");
+  out(`  Waiting up to ${waitSeconds}s for the session...`);
+
+  const deadline = Date.now() + waitSeconds * 1000;
+  let found = null;
+  while (Date.now() < deadline) {
+    await sleep(3);
+    const hit = findCookie({ host: "opencode.ai", name: OPENCODE_COOKIE_NAME, stores: readableFirefox });
+    if (hit.found && hit.value) {
+      found = hit;
+      break;
+    }
+  }
+
+  if (!found) {
+    err("");
+    err(`No "${OPENCODE_COOKIE_NAME}" cookie for opencode.ai appeared within ${waitSeconds}s.`);
+    err("Check that you completed the login in Firefox, then re-run this command.");
+    return 1;
+  }
+
+  out(`  session captured from ${found.store?.browser} ${found.store?.profile}`);
+  out("  the cookie is read live from the browser store; it is not copied anywhere");
+  const code = await verifyGoPlan({ stores: readableFirefox });
+  if (code !== 0) {
+    out("");
+    out("If the workspace id could not be found, open https://opencode.ai/ once in Firefox");
+    out("(the app lands on /workspace/<id>), then run: piquota auth opencode");
+  }
+  return code;
+}
+
+/**
+ * @param {{ stores?: import("../src/browser/cookies.js").CookieStore[] }} [options]
+ * @returns {Promise<number>}
+ */
+async function verifyGoPlan(options = {}) {
+  const cookie = resolveCookie({ stores: options.stores, allowBrowser: true });
+  if (!cookie.found) {
+    err(`no opencode.ai session found (${cookie.detail})`);
+    return 1;
+  }
+
+  const workspace = await discoverWorkspaceId({});
+  if (!workspace.workspaceId) {
+    err(`session found but no workspace id (${workspace.error})`);
+    return 1;
+  }
+  out(`  workspace: ${workspace.workspaceId}${workspace.origin ? ` (from ${workspace.origin})` : ""}`);
+
+  const plan = await readGoPlan({ cookie: cookie.value, workspaceId: workspace.workspaceId });
+  if (!plan.ok) {
+    err(`  dashboard read failed: ${plan.error}`);
+    return 1;
+  }
+  out("  Go plan windows:");
+  for (const window of plan.windows) {
+    const remaining = window.remainingPercent === null ? "n/a" : `${Math.round(window.remainingPercent)}% left`;
+    const reset = window.resetsInSec === null ? "" : ` · ${humanReset(window.resetsInSec)}`;
+    out(`    ${window.label.padEnd(16)} ${remaining}${reset}`);
+  }
+  return 0;
+}
+
+async function authStatus() {
+  out("Credential sources");
+  const paths = resolveAuthPaths({});
+  for (const path of paths) {
+    const store = describeStore(path);
+    out(`  pi store   ${path} (${store.sizeBytes ?? "?"} bytes)`);
+  }
+  const cookie = resolveCookie({});
+  out(`  opencode   ${cookie.found ? `session via ${cookie.origin} — ${cookie.detail}` : `no session — ${cookie.detail}`}`);
+  const workspace = configPaths({}).workspacePath;
+  out(`  workspace  ${existsSync(workspace) ? "cached" : "not cached"}`);
+
+  const stores = discoverCookieStores({});
+  out("  browser stores:");
+  for (const store of stores) {
+    out(`    ${store.readability === "plaintext" ? "readable " : "ENCRYPTED"} ${store.browser} ${store.profile}`);
+  }
+  return 0;
+}
+
+/**
+ * @param {import("../src/engine.js").PiQuotaReport} report
+ * @param {{ agentMode?: "pi" | "native", quiet?: boolean }} [options]
+ * @returns {Promise<number>}
+ */
+async function moshiPush(report, options = {}) {
+  // `alreadyMerged` lets the watcher do the merging once and still count what it
+  // is about to publish, instead of reporting a pre-restore number.
+  const { report: carried, reused } = options.alreadyMerged
+    ? { report, reused: [] }
+    : mergeSticky(options.previous ?? loadLastPublished({}), report);
+  // A transient failure falls back to the last *healthy* values per family, so a
+  // throttle can never leave a card blank.
+  const { report: sticky, restored } = options.alreadyMerged ? { report: carried, restored: [] } : mergeLastGood(carried);
+  const payload = buildUsagePayload(sticky, { agentMode: options.agentMode });
+  if (payload.snapshots.length === 0) {
+    if (!options.quiet) out("nothing to publish: no provider returned usage windows");
+    return 0;
+  }
+  const result = await pushUsage(payload, {});
+  if (!result.ok) {
+    err(`moshi push failed: ${result.error}`);
+    return 1;
+  }
+  saveLastPublished(sticky);
+  if (reused.length > 0 && !options.quiet) {
+    out(`(kept the previous snapshot for: ${reused.join(", ")} — transient upstream error)`);
+  }
+  if (restored.length > 0 && !options.quiet) {
+    out(`(showing the last known values for: ${restored.join(", ")})`);
+  }
+  if (!options.quiet) {
+    out(`published ${result.pushed} snapshot(s) to the paired Moshi host`);
+    for (const snapshot of payload.snapshots) {
+      out(`  ${snapshot.accountLabel.padEnd(20)} ${snapshot.windows.map((w) => `${w.label} ${w.usedPercentage}% used`).join(" · ")}`);
+    }
+  }
+  return 0;
+}
+
+async function moshiStatus() {
+  const paths = moshiPaths({});
+  out("Moshi");
+  out(`  state dir: ${paths.stateDir}`);
+  const credentials = readHostCredentials({});
+  out(`  pairing:   ${credentials.ok ? `paired as "${credentials.hostName}" (${credentials.hostId})` : credentials.error}`);
+  out(`  base url:  ${discoverBaseUrl({}) ?? "(moshi-hook default)"}`);
+  const setting = readUsageCollection({});
+  out(`  usage-collection: ${setting.enabled ? "on" : "off"} (${setting.path}${setting.raw ? ` = ${setting.raw}` : ""})`);
+  const artifact = resolveArtifactPath({});
+  out(`  artifact:  ${existsSync(artifact) ? artifact : `${artifact} (not written yet)`}`);
+  return 0;
+}
+
+/**
+ * @param {string[]} argv
+ * @param {import("../src/engine.js").PiQuotaReport} report
+ * @param {{ agentMode?: "pi" | "native" }} [options]
+ * @returns {Promise<number>}
+ */
+async function moshiWatch(argv, report, options = {}) {
+  const intervalIndex = argv.indexOf("--interval");
+  const intervalSec = intervalIndex >= 0 ? Number(argv[intervalIndex + 1]) || 60 : 60;
+  const ttlIndex = argv.indexOf("--fetch-ttl");
+  const fetchTtlSec = ttlIndex >= 0 ? Number(argv[ttlIndex + 1]) || 300 : 300;
+
+  out(`moshi watch: publishing every ${intervalSec}s, refetching every ${fetchTtlSec}s (Ctrl-C to stop)`);
+  out("  (the two are decoupled so the provider APIs are not polled once per push)");
+
+  let last = loadLastPublished({});
+  for (;;) {
+    const setting = readUsageCollection({});
+    if (!setting.enabled) {
+      out(`usage-collection is off in ${setting.path}; pausing`);
+    } else {
+      const fetched = await withCache({ ttlMs: fetchTtlSec * 1000 }, () =>
+        collectQuota({ families: FAMILIES, refresh: options.refresh }),
+      );
+      const carried = mergeSticky(last, fetched.report);
+      const final = mergeLastGood(carried.report);
+      last = final.report;
+
+      const result = await moshiPush(final.report, { agentMode: options.agentMode, quiet: true, alreadyMerged: true });
+      const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+      const ok = final.report.providers.filter((provider) => provider.ok).length;
+      const carriedNames = [...carried.reused, ...final.restored];
+      const note = carriedNames.length > 0
+        ? ` (carried: ${carriedNames.join(", ")})`
+        : fetched.cached
+          ? " (cached)"
+          : "";
+      out(result === 0 ? `${stamp} published ${ok} provider(s)${note}` : `${stamp} push failed`);
+    }
+    await sleep(intervalSec);
+  }
+}
+
+const SERVICE_NAME = "pi-quota-moshi.service";
+
+async function moshiService(argv) {
+  const action = argv[0] ?? "status";
+  const unitDir = join(homedir(), ".config", "systemd", "user");
+  const unitPath = join(unitDir, SERVICE_NAME);
+  const cli = process.argv[1] ?? join(process.cwd(), "bin", "piquota.js");
+
+  if (action === "status") {
+    const result = spawnSync("systemctl", ["--user", "is-active", SERVICE_NAME], { encoding: "utf-8" });
+    out(`unit: ${unitPath}`);
+    out(`installed: ${existsSync(unitPath) ? "yes" : "no"}`);
+    out(`active: ${(result.stdout ?? "").trim() || "unknown"}`);
+    return 0;
+  }
+
+  if (action === "install") {
+    const unit = `[Unit]
+Description=pi-quota -> Moshi usage publisher
+After=moshi-hook.service
+
+[Service]
+Type=simple
+ExecStart=${process.execPath} ${cli} moshi watch --interval 60
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
+`;
+    const written = writeSecretFile(unitPath, unit);
+    if (!written.ok) {
+      err(`could not write ${unitPath}: ${written.error}`);
+      return 1;
+    }
+    out(`wrote ${unitPath}`);
+    spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
+    const enabled = spawnSync("systemctl", ["--user", "enable", "--now", SERVICE_NAME], { stdio: "inherit" });
+    if (enabled.status !== 0) {
+      err("systemctl enable failed; run it manually");
+      return 1;
+    }
+    out("service enabled and started");
+    return 0;
+  }
+
+  if (action === "uninstall") {
+    spawnSync("systemctl", ["--user", "disable", "--now", SERVICE_NAME], { stdio: "inherit" });
+    spawnSync("rm", ["-f", unitPath]);
+    spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
+    out(`removed ${unitPath}`);
+    return 0;
+  }
+
+  err(`unknown moshi service action: ${action}`);
+  return 2;
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const args = parseArgs(argv);
+  const bare = argv.filter((value) => !value.startsWith("-"));
+  const command = bare[0] ?? null;
+  const agentMode = "native";
+  const refresh = !argv.includes("--no-refresh");
+
+  if (args.help) {
+    process.stdout.write(HELP);
+    return 0;
+  }
+  if (args.version) {
+    out(`piquota ${VERSION}`);
+    return 0;
+  }
+  if (args.clearCache) {
+    const result = clearCache({});
+    out(result.removed ? `cache cleared: ${result.path}` : `no cache at ${result.path}`);
+    return 0;
+  }
+
+  if (command === "auth") {
+    const sub = bare[1] ?? "status";
+    if (sub === "opencode") return authOpenCode(argv);
+    if (sub === "status") return authStatus();
+    err(`unknown auth action: ${sub}`);
+    return 2;
+  }
+
+  const { families, unknown } = resolveFamilies(
+    command === "quota" ? bare.slice(1) : bare.filter((value) => value !== "moshi" && value !== "quota"),
+  );
+
+  if (command === "moshi") {
+    const sub = bare[1] ?? "status";
+    if (sub === "status") return moshiStatus();
+    if (sub === "service") return moshiService(argv.slice(argv.indexOf("service") + 1));
+
+    const report = await collectQuota({ families: FAMILIES, timeoutMs: args.timeoutMs, refresh });
+    if (sub === "push") return moshiPush(report, { agentMode });
+    if (sub === "watch") return moshiWatch(argv, report, { agentMode, refresh });
+    if (sub === "artifact") {
+      const artifact = buildArtifact(report);
+      if (argv.includes("--print")) {
+        out(JSON.stringify(artifact, null, 2));
+      } else {
+        const written = writeArtifact(artifact, resolveArtifactPath({}));
+        out(written.ok ? `wrote ${written.path}` : `failed to write ${written.path}: ${written.error}`);
+      }
+      return 0;
+    }
+    err(`unknown moshi action: ${sub}`);
+    return 2;
+  }
+
+  if (unknown.length > 0) {
+    err(`unknown argument: ${unknown.join(" ")}\n`);
+    process.stdout.write(HELP);
+    return 2;
+  }
+
+  const selected = families.length > 0 ? families : FAMILIES;
+  const load = () => collectQuota({ families: selected, timeoutMs: args.timeoutMs, refresh });
+
+  let report;
+  let cached = false;
+  let ageMs = 0;
+  if (args.noCache) {
+    report = await load();
+  } else {
+    const result = await withCache({ ttlMs: args.ttlMs, force: args.force }, load);
+    report = result.report;
+    cached = result.cached;
+    ageMs = result.ageMs;
+  }
+
+  // Same rule as the Moshi publisher: while a provider is throttled, surface its
+  // last known real values (labelled with their age) instead of "n/a". Being
+  // blind exactly while an endpoint is rate-limiting is the worst outcome, and
+  // the terminal and the phone should not disagree.
+  const { report: reportWithHistory, restored } = mergeLastGood(report, {});
+  report = reportWithHistory;
+  if (restored.length > 0 && !args.json && !args.compact && !args.status) {
+    process.stderr.write(`note: showing last known values for ${restored.join(", ")}\n`);
+  }
+
+  const paint = ansiPalette({ color: args.color });
+
+  if (args.json) {
+    out(JSON.stringify({ ...report, cache: { used: cached, ageMs } }, null, 2));
+    return report.providers.some((provider) => provider.ok) ? 0 : 1;
+  }
+  if (args.status) {
+    out(renderStatusLine(report.providers, paint));
+    return 0;
+  }
+  if (args.compact) {
+    for (const line of renderCompact(report.providers, paint)) out(line);
+  } else {
+    for (const line of renderPanel(report.providers, paint, {
+      generatedAt: report.generatedAt,
+      warnings: report.warnings,
+    })) {
+      out(line);
+    }
+  }
+  if (args.explain) {
+    for (const line of explainLines(selected)) out(line);
+  }
+
+  return report.providers.some((provider) => provider.ok) ? 0 : 1;
+}
+
+main().then(
+  (code) => process.exit(code),
+  (error) => {
+    err(`piquota failed: ${redact(/** @type {{ message?: string }} */ (error)?.message ?? error)}`);
+    process.exit(1);
+  },
+);

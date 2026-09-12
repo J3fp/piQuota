@@ -1,0 +1,27 @@
+{
+  "openai-codex": {
+    "type": "oauth",
+    "access": "eyJmaXh0dXJlLXBheWxvYWQiOiJub3QtYS1yZWFsLXRva2VuIn0.fake-signature",
+    "refresh": "rt.1.FAKE-refresh-token-for-fixtures-only",
+    "expires": 1893456000000,
+    "accountId": "acct_fixture"
+  },
+  "opencode-go": {
+    "type": "api_key",
+    "key": "sk-FAKE-zen-api-key-for-fixtures-only"
+  },
+  "anthropic": {
+    "type": "oauth",
+    "refresh": "sk-ant-ort01-FAKE-refresh-for-fixtures-only",
+    "access": "sk-ant-oat01-FAKE-access-for-fixtures-only",
+    "expires": 1893456000000
+  },
+  "antigravity": {
+    "refresh": "1//FAKE-google-refresh-for-fixtures-only",
+    "access": "ya29.FAKE-google-access-for-fixtures-only",
+    "expires": 1893456000000,
+    "projectId": "fixture-project",
+    "email": "fixture@example.com",
+    "type": "oauth"
+  }
+}

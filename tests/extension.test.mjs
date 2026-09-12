@@ -1,0 +1,301 @@
+/**
+ * Extension contract tests.
+ *
+ * The extension is loaded through Node's TypeScript type-stripping, so these run
+ * without the Pi TUI. They pin the parts that are easy to break silently:
+ * the default surface, the used-percent semantics, the brand colours, and the
+ * fact that nothing touches the LLM context.
+ */
+
+import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+const EXTENSION = fileURLToPath(new URL("../extensions/quota-panel.ts", import.meta.url));
+
+/** Strips SGR sequences so assertions can talk about visible text. */
+const plain = (text) => String(text).replace(/\u001b\[[0-9;]*m/g, "");
+
+const REPORT = {
+  providers: [
+    {
+      family: "claude",
+      label: "Claude (Pi)",
+      primaryWindowId: "5h",
+      account: "fixture@example.com",
+      plan: null,
+      windows: [
+        { id: "5h", label: "5h window", usedPercent: 4, remainingPercent: 96, resetsAt: null, resetsInSec: 3600, note: null },
+        { id: "weekly", label: "Weekly window", usedPercent: 11, remainingPercent: 89, resetsAt: null, resetsInSec: 500000, note: null },
+      ],
+      error: null,
+      ok: true,
+      updatedAt: "2030-01-01T00:00:00.000Z",
+      expiresInMin: 600,
+    },
+    {
+      family: "codex",
+      label: "Codex (Pi)",
+      primaryWindowId: "5h",
+      account: "fixture@example.com",
+      plan: "plus",
+      windows: [
+        { id: "5h", label: "5h window", usedPercent: 19, remainingPercent: 81, resetsAt: null, resetsInSec: 7200, note: null },
+      ],
+      error: null,
+      ok: true,
+      updatedAt: "2030-01-01T00:00:00.000Z",
+      expiresInMin: 600,
+    },
+    {
+      family: "antigravity",
+      label: "Antigravity (Pi)",
+      primaryWindowId: "gemini-5h",
+      account: "fixture@example.com",
+      plan: null,
+      windows: [
+        { id: "gemini-5h", label: "Gemini · 5h", usedPercent: 62, remainingPercent: 38, resetsAt: null, resetsInSec: 300, note: null },
+        { id: "gemini-weekly", label: "Gemini · weekly", usedPercent: 3, remainingPercent: 97, resetsAt: null, resetsInSec: 900000, note: null },
+      ],
+      error: null,
+      ok: true,
+      updatedAt: "2030-01-01T00:00:00.000Z",
+      expiresInMin: 600,
+    },
+    {
+      family: "opencode-go",
+      label: "OpenCode Go (Pi)",
+      primaryWindowId: null,
+      account: "workspace wrk_x",
+      plan: "Go subscription",
+      windows: [],
+      error: "no auth cookie",
+      ok: false,
+      updatedAt: "2030-01-01T00:00:00.000Z",
+      expiresInMin: null,
+    },
+  ],
+  generatedAt: "2030-01-01T00:00:00.000Z",
+  sources: ["/tmp/auth.json"],
+  warnings: [],
+};
+
+/**
+ * Minimal fake of the ExtensionAPI subset the extension uses.
+ *
+ * @param {{ report?: unknown, fail?: boolean }} [options]
+ */
+function makeHarness(options = {}) {
+  const commands = [];
+  const handlers = new Map();
+  const statuses = [];
+  const widgets = [];
+  const notifications = [];
+  const forbidden = [];
+
+  const pi = {
+    on: (name, handler) => handlers.set(name, handler),
+    exec: async () => {
+      if (options.fail) throw new Error("piquota exploded");
+      return { stdout: JSON.stringify(options.report ?? REPORT), stderr: "", code: 0 };
+    },
+    registerCommand: (name, definition) => commands.push({ name, definition }),
+    registerTool: () => forbidden.push("registerTool"),
+    registerFlag: () => forbidden.push("registerFlag"),
+    sendMessage: () => forbidden.push("sendMessage"),
+    appendEntry: () => forbidden.push("appendEntry"),
+    registerEntryRenderer: () => forbidden.push("registerEntryRenderer"),
+  };
+
+  const ctx = {
+    hasUI: true,
+    ui: {
+      theme: { fg: (_key, text) => text, bold: (text) => text },
+      setStatus: (_key, value) => statuses.push(value),
+      setWidget: (_key, value) => widgets.push(value),
+      notify: (message) => notifications.push(message),
+    },
+  };
+
+  return { pi, ctx, commands, handlers, statuses, widgets, notifications, forbidden };
+}
+
+async function startSession(harness) {
+  await harness.handlers.get("session_start")({}, harness.ctx);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+
+test("the extension loads and registers /quota and /usage", async () => {
+  const module = await import(EXTENSION);
+  assert.equal(typeof module.default, "function");
+
+  const harness = makeHarness();
+  module.default(harness.pi);
+
+  assert.deepEqual(harness.commands.map((command) => command.name), ["quota", "usage"]);
+  for (const command of harness.commands) {
+    assert.equal(typeof command.definition.handler, "function");
+    assert.equal(typeof command.definition.description, "string");
+  }
+  assert.equal(harness.forbidden.length, 0, "extension must not register context-affecting APIs");
+});
+
+test("the line is the default surface, on its own row, and the footer is left alone", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+  await startSession(harness);
+
+  const widget = harness.widgets.at(-1);
+  assert.ok(Array.isArray(widget), "the line must be a widget: gentle-pi truncates the footer from the end");
+  assert.equal(widget.length, 1, "one row only");
+  assert.equal(harness.statuses.at(-1), undefined, "the footer must stay untouched by default");
+});
+
+test("the line shows used percent, not remaining", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+  await startSession(harness);
+
+  const visible = plain(harness.widgets.at(-1)[0]);
+  // Claude 5h is 96% left => 4% used; Antigravity's shortest window is 62% used.
+  assert.match(visible, /Claude:○ 4%/);
+  assert.match(visible, /Codex:○ 19%/);
+  assert.match(visible, /Agy:◕ 62%/);
+  assert.match(visible, /OP-Go:!/);
+  assert.equal(/left/.test(visible), false, "must not report remaining");
+});
+
+test("each provider name is painted with its own brand colour", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+  await startSession(harness);
+
+  const raw = String(harness.widgets.at(-1)[0]);
+  assert.match(raw, /\u001b\[38;2;217;119;87m/, "Claude clay");
+  assert.match(raw, /\u001b\[38;2;16;163;127m/, "Codex teal");
+  assert.match(raw, /\u001b\[38;2;66;133;244m/, "Google blue");
+});
+
+test("the semaphore changes colour and shape with the used band", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+  await startSession(harness);
+  const raw = String(harness.widgets.at(-1)[0]);
+
+  assert.ok(raw.includes("#3FB950") === false);
+  assert.match(raw, /\u001b\[38;2;63;185;80m○/, "green empty circle for low usage");
+  assert.match(raw, /\u001b\[38;2;210;153;34m◕/, "amber half circle for mid usage");
+});
+
+test("NO_COLOR is honoured so a mono terminal stays readable", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+  const previous = process.env.NO_COLOR;
+  process.env.NO_COLOR = "1";
+  try {
+    await startSession(harness);
+    const raw = String(harness.widgets.at(-1)[0]);
+    assert.equal(/\u001b\[38;2;/.test(raw), false, "no truecolor when NO_COLOR is set");
+    assert.match(raw, /Claude:○ 4%/);
+  } finally {
+    if (previous === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = previous;
+  }
+});
+
+test("the bare command reveals the full panel and summarises used percent", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+  const quota = harness.commands.find((command) => command.name === "quota");
+  await quota.definition.handler("", harness.ctx);
+
+  const widget = harness.widgets.at(-1);
+  assert.ok(widget.length > 1, "the panel lists every window");
+  const text = plain(widget.join("\n"));
+  assert.match(text, /5h window/);
+  assert.match(text, /Weekly window/);
+  assert.match(text, /Gemini · weekly/);
+  assert.match(text, /used %/);
+
+  assert.ok(harness.notifications.some((message) => message.includes("Claude: 4% used")));
+  assert.ok(harness.notifications.some((message) => message.includes("OP-Go: unavailable")));
+});
+
+test("subcommands toggle the line, the panel, the footer and hide everything", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+  const quota = harness.commands.find((command) => command.name === "quota");
+
+  await quota.definition.handler("panel", harness.ctx);
+  assert.ok(harness.widgets.at(-1).length > 1);
+
+  await quota.definition.handler("line", harness.ctx);
+  assert.equal(harness.widgets.at(-1).length, 1);
+
+  await quota.definition.handler("status", harness.ctx);
+  assert.match(plain(harness.statuses.at(-1)), /Claude:○ 4%/);
+
+  await quota.definition.handler("nostatus", harness.ctx);
+  assert.equal(harness.statuses.at(-1), undefined);
+
+  await quota.definition.handler("hide", harness.ctx);
+  assert.equal(harness.widgets.at(-1), undefined);
+});
+
+test("a failing CLI reports an error instead of throwing", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness({ fail: true });
+  module.default(harness.pi);
+  await startSession(harness);
+
+  // The widget surfaces the real reason; only a blank failure would fall back to
+  // the generic text, and that would be less useful than what we assert here.
+  assert.match(plain(harness.widgets.at(-1)[0]), /piquota exploded|quota unavailable/);
+
+  const quota = harness.commands.find((command) => command.name === "quota");
+  await quota.definition.handler("", harness.ctx);
+  assert.ok(harness.notifications.some((message) => message.startsWith("Quota unavailable")));
+});
+
+test("session_shutdown clears both the footer and the widget", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+  await startSession(harness);
+  await harness.handlers.get("session_shutdown")({}, harness.ctx);
+
+  assert.equal(harness.statuses.at(-1), undefined);
+  assert.equal(harness.widgets.at(-1), undefined);
+});
+
+test("the line stays compact enough to fit one row", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+  await startSession(harness);
+
+  const visible = plain(harness.widgets.at(-1)[0]);
+  assert.ok(visible.length <= 60, `line too long: ${visible.length} -> ${visible}`);
+});
+
+test("the first paint says loading, not unavailable", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness();
+  module.default(harness.pi);
+
+  // Paint before the async refresh resolves.
+  await harness.handlers.get("session_start")({}, harness.ctx);
+  const first = plain(harness.widgets.at(-1)[0]);
+  assert.match(first, /quota …/);
+  assert.equal(/unavailable/.test(first), false, "no false error before the first fetch");
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.match(plain(harness.widgets.at(-1)[0]), /Claude:○ 4%/);
+});

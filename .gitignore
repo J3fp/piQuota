@@ -1,0 +1,19 @@
+# Node & dependencies
+node_modules/
+
+# Runtime & cache states
+.atl/
+.cache/
+*.tmp
+*.log
+coverage/
+
+# Environment & local credentials
+.env
+.env.*
+*.local
+.shuvquota.env
+
+# OS specific
+.DS_Store
+Thumbs.db

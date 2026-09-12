@@ -1,0 +1,20 @@
+{
+  "name": "pi-quota",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only quota monitor for Pi provider credentials: shuvquota source, Pi TUI extension, and a Moshi usage adapter",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "piquota": "./bin/piquota.js",
+    "shuvquota": "./bin/shuvquota.js"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "quota": "node bin/piquota.js",
+    "quota:json": "node bin/piquota.js --json"
+  },
+  "license": "MIT"
+}
