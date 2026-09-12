@@ -44,6 +44,7 @@ const MAX_WINDOWS_PROFILES = 40;
  * @property {string} family              Normalized family, e.g. "codex".
  * @property {string} label               Display label, e.g. "Codex (Pi)".
  * @property {string} source              Absolute path the credential came from.
+ * @property {"pi" | "claude-code"} [sourceKind]  Which kind of store produced it.
  * @property {string} identity            Stable per-provider identity (never a token).
  * @property {string} [access]            OAuth access token (memory only).
  * @property {string} [refresh]           OAuth refresh token (memory only).
@@ -229,6 +230,7 @@ export function normalizeCredential(provider, raw, source) {
     family,
     label: LABEL_BY_FAMILY[family],
     source,
+    sourceKind: "pi",
     identity,
     access: access ?? undefined,
     refresh: refresh ?? undefined,

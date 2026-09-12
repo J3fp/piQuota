@@ -9,6 +9,8 @@ Field **names** only; values never appear in code, logs, tests or artifacts.
 | --- | --- | --- |
 | Pi provider store | `$PI_QUOTA_AUTH_PATH` / `$PI_AUTH_PATH`, else `$HOME/.pi/agent/auth.json` | read-only (`flag: "r"`) |
 | Pi store (WSL) | `/mnt/c/Users/<profile>/.pi/agent/auth.json` | read-only, auto-discovered, de-duplicated against the Linux store |
+| Claude Code CLI store | `$PI_QUOTA_CLAUDE_CODE_CREDENTIALS`, else `$CLAUDE_CONFIG_DIR/.credentials.json`, else `$HOME/.claude/.credentials.json` | read-only (`flag: "r"`); the second Claude source |
+| Claude Code profile | `$CLAUDE_CONFIG_DIR/.claude.json`, else `$HOME/.claude.json` | read-only; only `oauthAccount.emailAddress`, `displayName` and `organizationType` are read, never project history |
 | opencode.ai session | `OPENCODE_GO_AUTH_COOKIE`, else `~/.config/pi-quota/opencode-cookie`, else a local Firefox cookie database | read-only; browser databases are copied to a temp dir first |
 | Moshi host secret | `~/.local/state/moshi/secrets.json` | read-only; `host-secret` is sent only as a Bearer header to the paired host |
 
@@ -32,6 +34,36 @@ fingerprint of the secret). The fingerprint is one-way and is only a stable key.
 
 `expires` is epoch **milliseconds** (values above `1e11` are ms, below are
 seconds).
+
+### Claude Code entry schema
+
+```jsonc
+{
+  "claudeAiOauth": {
+    "accessToken": "sk-ant-oat01…",
+    "refreshToken": "sk-ant-ort01…",        // presence checked, value never read
+    "expiresAt": 1789273564505,             // access token expiry, epoch ms
+    "refreshTokenExpiresAt": 1791828826505, // never read
+    "scopes": ["user:inference", "user:profile", "user:sessions:claude_code"],
+    "subscriptionType": "pro",
+    "rateLimitTier": "default_claude_ai"
+  }
+}
+```
+
+`~/.claude.json` is read for the account identity only: `oauthAccount.emailAddress`,
+`displayName` and `organizationType`. That file also holds project history and
+session state, and none of it is read or echoed.
+
+| Field | Read by | Purpose | Written? |
+| --- | --- | --- | --- |
+| `accessToken` | `claude-code-auth.js` | `Authorization: Bearer` against `api.anthropic.com/api/oauth/usage` | **no** |
+| `refreshToken` | `claude-code-auth.js` | presence reported as a boolean in `--explain`; the value is never placed on the credential | **no** |
+| `expiresAt` | `claude-code-auth.js` | freshness warning | **no** |
+| `refreshTokenExpiresAt` | — | deliberately not read | **no** |
+| `subscriptionType` | `claude-code-auth.js` | the card's plan label | **no** |
+| `rateLimitTier` | `claude-code-auth.js` | diagnostics | **no** |
+| `oauthAccount.emailAddress` | `claude-code-auth.js` | display identity, redacted in artifacts | **no** |
 
 ## Field usage
 

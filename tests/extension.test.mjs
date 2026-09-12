@@ -371,3 +371,41 @@ test("unconfigured providers are omitted from the editor line and summary", asyn
   assert.equal(visible.includes("Agy"), false, "unconfigured Antigravity must not appear in the line");
   assert.equal(visible.includes("OP-Go"), false, "unconfigured OpenCode Go must not appear in the line");
 });
+
+test("the panel names the Claude store, and the line never does", async () => {
+  const module = await import(EXTENSION);
+  const harness = makeHarness({
+    report: {
+      generatedAt: "2030-01-01T00:00:00.000Z",
+      sources: ["/tmp/auth.json"],
+      warnings: [],
+      providers: [
+        {
+          family: "claude",
+          label: "Claude (Pi)",
+          primaryWindowId: "5h",
+          account: "fixture@example.com",
+          plan: "pro",
+          sourceKind: "claude-code",
+          windows: [{ id: "5h", label: "5h", usedPercent: 10, remainingPercent: 90, resetsAt: null, resetsInSec: 3600, note: null }],
+          error: null,
+          ok: true,
+          updatedAt: "2030-01-01T00:00:00.000Z",
+          expiresInMin: 60,
+        },
+      ],
+    },
+  });
+  module.default(harness.pi);
+  await startSession(harness);
+
+  // The compact line stays a line: no provenance in it.
+  const line = plain(harness.widgets.at(-1)[0]);
+  assert.equal(/Claude Code CLI/.test(line), false, "the line must stay short");
+  assert.match(line, /Claude:○ 10%/);
+
+  const quota = harness.commands.find((command) => command.name === "quota");
+  await quota.definition.handler("", harness.ctx);
+  const panel = plain(harness.widgets.at(-1).join("\n"));
+  assert.match(panel, /Claude Code CLI/, "the panel says which store was read");
+});

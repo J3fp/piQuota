@@ -121,6 +121,7 @@ export async function fetchQuota(credential, options = {}) {
     label: "Antigravity (Pi)",
     account: displayIdentity(credential),
     source: credential.source,
+    sourceKind: credential.sourceKind ?? "pi",
     expiresInMin: options.expiresInMin ?? null,
   };
 

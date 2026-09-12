@@ -11,6 +11,8 @@
  *   piquota moshi watch          keep publishing on an interval
  *   piquota moshi artifact       write the local Moshi-shaped artifact
  *   piquota moshi service ...    install/remove the user service that runs `moshi watch`
+ *   piquota moshi takeover       become the only usage publisher on the paired host
+ *   piquota moshi release        hand usage publishing back to moshi-hook's own poller
  */
 
 import { spawnSync } from "node:child_process";
@@ -30,7 +32,10 @@ import { discoverCookieStores, findCookie } from "../src/browser/cookies.js";
 import { OPENCODE_COOKIE_NAME, configPaths, discoverWorkspaceId, readGoPlan, resolveCookie, writeSecretFile } from "../src/opencode/session.js";
 import { buildUsagePayload, discoverBaseUrl, moshiPaths, pushUsage, readHostCredentials } from "../src/moshi/client.js";
 import { buildArtifact, resolveArtifactPath, writeArtifact } from "../src/moshi/artifact.js";
-import { readUsageCollection } from "../src/moshi/settings.js";
+import { effectiveUsageCollection, readUsageCollection } from "../src/moshi/settings.js";
+import { clearTakeover, readTakeover, setMoshiUsageCollection, writeTakeover } from "../src/moshi/takeover.js";
+import { confirmDaemonUsageCollection, resolveHookLogPath, restartMoshiDaemon } from "../src/moshi/daemon.js";
+import { describeClaudeCodeSource } from "../src/auth/claude-code-auth.js";
 import { loadLastPublished, mergeLastGood, mergeSticky, saveLastPublished } from "../src/moshi/sticky.js";
 
 const VERSION = "0.2.0";
@@ -90,6 +95,8 @@ Moshi:
   piquota moshi status             host pairing and usage-collection state
   piquota moshi service install    run \`moshi watch\` as a systemd user service
   piquota moshi service uninstall  remove that service
+  piquota moshi takeover           stop moshi-hook's own poller so only these cards exist
+  piquota moshi release            restore moshi-hook's own poller and stop overriding it
 
 Guarantees:
   * ~/.pi/agent/auth.json is opened read-only. Never written, synced or refreshed.
@@ -142,6 +149,25 @@ function explainLines(families) {
 
   const cookie = resolveCookie({});
   lines.push(`  opencode.ai cookie: ${cookie.found ? `found via ${cookie.origin} (${cookie.detail})` : `not found (${cookie.detail})`}`);
+  // Claude has two sources, and which one is in use is the single most useful
+  // diagnostic for a provider that answers 400 or "not configured".
+  const claudeCode = describeClaudeCodeSource({});
+  lines.push("");
+  lines.push("Claude source resolution:");
+  lines.push(`  preference: ${process.env.PI_QUOTA_CLAUDE_SOURCE ?? "auto"} (auto prefers the Claude Code CLI)`);
+  lines.push(`  Claude Code store: ${claudeCode.path ?? "none found"}`);
+  if (claudeCode.path) {
+    lines.push(
+      `    access token: ${claudeCode.hasAccessToken ? "yes" : "no"}` +
+        ` · refresh token present: ${claudeCode.hasRefreshToken ? "yes (never read, never used)" : "no"}` +
+        ` · expires in: ${claudeCode.expiresInMin === null ? "unknown" : `${claudeCode.expiresInMin}m`}` +
+        ` · plan: ${claudeCode.plan ?? "unknown"}`,
+    );
+  } else if (claudeCode.error) {
+    lines.push(`    ${redact(claudeCode.error)}`);
+  }
+  lines.push("  fields read from that store: claudeAiOauth.accessToken, expiresAt, subscriptionType, rateLimitTier");
+  lines.push("  never read from that store: the refresh token value, and nothing is ever written back");
   lines.push(`  cache: ${resolveCachePath({})} (${describeCache({}).exists ? "present" : "absent"})`);
   lines.push(`  families requested: ${families.join(", ")}`);
   for (const warning of loaded.warnings) lines.push(`  warn: ${redact(warning)}`);
@@ -161,6 +187,15 @@ function out(text) {
  */
 function err(text) {
   process.stderr.write(text.endsWith("\n") ? text : `${text}\n`);
+}
+
+/**
+ * A non-fatal problem worth showing without hiding the rest of the output.
+ *
+ * @param {string} text
+ */
+function warn(text) {
+  process.stderr.write(`warning: ${text.endsWith("\n") ? text : `${text}\n`}`);
 }
 
 /**
@@ -387,9 +422,126 @@ async function moshiStatus() {
   out(`  base url:  ${discoverBaseUrl({}) ?? "(moshi-hook default)"}`);
   const setting = readUsageCollection({});
   out(`  usage-collection: ${setting.enabled ? "on" : "off"} (${setting.path}${setting.raw ? ` = ${setting.raw}` : ""})`);
+
+  const effective = effectiveUsageCollection({});
+  const takeover = readTakeover({});
+  if (takeover.active) {
+    out(`  publisher:  piQuota (takeover recorded ${takeover.takenAt ?? "unknown"} in ${takeover.path})`);
+    out("              `piquota moshi release` hands publishing back to moshi-hook");
+    if (effective.duplicateRisk) {
+      out("              WARNING: moshi-hook's own poller is on again while the takeover is recorded,");
+      out("                       so both publishers will send usage for the same agents.");
+    }
+  } else {
+    out("  publisher:  moshi-hook's own poller (piQuota follows its usage-collection switch)");
+  }
+
+  const applied = await confirmDaemonUsageCollection({});
+  out(`  daemon log: ${resolveHookLogPath({})}`);
+  out(`              ${applied.confirmed ? applied.detail : `unconfirmed (${applied.detail})`}`);
   const artifact = resolveArtifactPath({});
   out(`  artifact:  ${existsSync(artifact) ? artifact : `${artifact} (not written yet)`}`);
   return 0;
+}
+
+/**
+ * Make piQuota the only publisher, or hand the job back.
+ *
+ * moshi-hook's own poller reads each agent's CLI-owned credential file, so simply
+ * installing Claude Code is enough to produce a second, differently-attributed
+ * Claude card. The takeover stops that poller, and the record lives in piQuota's
+ * own state so that reading moshi-hook's switch off is not mistaken for an
+ * instruction to stop publishing.
+ *
+ * @param {string} action
+ * @returns {Promise<number>}
+ */
+async function moshiPublisher(action) {
+  const settings = readUsageCollection({});
+  const takeover = readTakeover({});
+
+  if (action === "takeover") {
+    if (takeover.active && settings.enabled) {
+      warn("a takeover is already recorded but moshi-hook's own poller is on again");
+      warn("run `piquota moshi release` first, so the original setting is restored deliberately");
+      return 1;
+    }
+
+    if (!takeover.active) {
+      const applied = setMoshiUsageCollection("off");
+      if (!applied.ok) {
+        err(`could not change moshi-hook's setting: ${applied.error}`);
+        err(`try \`${applied.argv.join(" ")}\` yourself, or \`moshi-hook set\` to list every setting`);
+        return 1;
+      }
+      const written = writeTakeover({ previous: settings.raw ?? (settings.enabled ? "true" : "false") });
+      if (!written.ok) {
+        err(`usage-collection is off, but the takeover could not be recorded: ${written.error}`);
+        err("run `piquota moshi release` to put the setting back before trying again");
+        return 1;
+      }
+      out(`moshi-hook: usage-collection = off (was ${settings.raw ?? "unset"})`);
+      out(`piQuota:    takeover recorded in ${written.path}`);
+    } else {
+      out(`piQuota:    takeover already recorded in ${takeover.path}`);
+    }
+
+    const restart = restartMoshiDaemon({});
+    out(`daemon:     ${restart.ok ? restart.detail : `not restarted — ${restart.detail}`}`);
+
+    // A restart returns before the daemon has logged its banner, so this waits for
+    // a banner at least as new as the restart instead of reading a stale one.
+    const applied = await confirmDaemonUsageCollection({ notBeforeMs: restart.restartedAtMs });
+    if (!applied.confirmed) {
+      warn(`verification: unconfirmed (${applied.detail})`);
+    } else if (applied.applied === true) {
+      warn("verification: the daemon still reports usage-collection on, so it has not picked the change up");
+    } else {
+      out(`verification: ${applied.detail}`);
+    }
+
+    out("");
+    out("piQuota is now the only usage publisher. Moshi shows:");
+    out("  Claude (Pi) · Codex (Pi) · Antigravity (Pi) · OpenCode Go (Pi)");
+    out("");
+    out("What this does and does not change:");
+    out("  * the daemon's notification and approval bridge is untouched; only its usage poller stops.");
+    out("  * Claude Code's own rate-limit notices inside Pi are untouched: they come from the plugin.");
+    out("  * these cards use piQuota's own account ids (`pi:<family>`), so a usage-alert rule bound to");
+    out("    moshi-hook's previous card has to be enabled again in the app, and the old card is left behind.");
+    out("  * undo with `piquota moshi release`.");
+    return 0;
+  }
+
+  if (action === "release") {
+    const restored = takeover.previous ?? "true";
+    const applied = setMoshiUsageCollection(restored);
+    if (!applied.ok) {
+      err(`could not restore moshi-hook's setting: ${applied.error}`);
+      err(`run \`moshi-hook set usage-collection ${restored}\` yourself; the takeover record is kept until you do`);
+      return 1;
+    }
+    const cleared = clearTakeover({});
+    if (!cleared.ok) {
+      err(`restored the setting, but the takeover record could not be removed: ${cleared.error}`);
+      return 1;
+    }
+    out(`moshi-hook: usage-collection = ${restored}`);
+    out(`piQuota:    takeover record ${cleared.removed ? "removed" : "was not present"}`);
+
+    const restart = restartMoshiDaemon({});
+    out(`daemon:     ${restart.ok ? restart.detail : `not restarted — ${restart.detail}`}`);
+
+    const confirmed = await confirmDaemonUsageCollection({ notBeforeMs: restart.restartedAtMs });
+    out(`verification: ${confirmed.confirmed ? confirmed.detail : `unconfirmed (${confirmed.detail})`}`);
+    out("");
+    out("moshi-hook publishes usage again. A card piQuota created under `pi:<family>` is left behind;");
+    out("remove it from the app if you no longer want it.");
+    return 0;
+  }
+
+  err(`unknown publisher action: ${action} (expected takeover or release)`);
+  return 1;
 }
 
 /**
@@ -409,7 +561,7 @@ async function moshiWatch(argv, report, options = {}) {
 
   let last = loadLastPublished({});
   for (;;) {
-    const setting = readUsageCollection({});
+    const setting = effectiveUsageCollection({});
     if (!setting.enabled) {
       out(`usage-collection is off in ${setting.path}; pausing`);
     } else {
@@ -530,6 +682,7 @@ async function main() {
   if (command === "moshi") {
     const sub = bare[1] ?? "status";
     if (sub === "status") return moshiStatus();
+    if (sub === "takeover" || sub === "release") return moshiPublisher(sub);
     if (sub === "service") return moshiService(argv.slice(argv.indexOf("service") + 1));
 
     const report = await collectQuota({ families: FAMILIES, timeoutMs: args.timeoutMs, refresh });

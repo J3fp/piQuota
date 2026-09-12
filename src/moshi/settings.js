@@ -9,6 +9,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { readTakeover } from "./takeover.js";
+
 /**
  * @param {string} value
  * @returns {number | null}
@@ -48,4 +50,41 @@ export function readUsageCollection(options = {}) {
   if (value === "false" || value === "off") return { enabled: false, raw: value, intervalSec: null, path };
   if (value === "true" || value === "on") return { enabled: true, raw: value, intervalSec: null, path };
   return { enabled: true, raw: value, intervalSec: parseDurationSeconds(value), path };
+}
+
+/**
+ * Whether *this* publisher may push right now.
+ *
+ * `usage_collection` belongs to moshi-hook's own poller. After an explicit
+ * `piquota moshi takeover` the setting is off precisely so that piQuota is the
+ * only publisher left, and reading it as "stop publishing" would silence the
+ * very thing the user asked for. The takeover is recorded explicitly, so this is
+ * never inferred from the setting alone.
+ *
+ * @param {{ configPath?: string, home?: string, env?: Record<string, string | undefined>, stateDir?: string }} [options]
+ * @returns {{
+ *   enabled: boolean,
+ *   takeover: boolean,
+ *   moshiHookEnabled: boolean,
+ *   duplicateRisk: boolean,
+ *   raw: string | null,
+ *   intervalSec: number | null,
+ *   path: string,
+ * }}
+ */
+export function effectiveUsageCollection(options = {}) {
+  const setting = readUsageCollection(options);
+  const takeover = readTakeover(options);
+  const moshiHookEnabled = setting.enabled;
+  return {
+    enabled: takeover.active || moshiHookEnabled,
+    takeover: takeover.active,
+    moshiHookEnabled,
+    // moshi-hook collecting again while a takeover is recorded means two
+    // publishers for the same account, which is what the takeover removed.
+    duplicateRisk: takeover.active && moshiHookEnabled,
+    raw: setting.raw,
+    intervalSec: setting.intervalSec,
+    path: setting.path,
+  };
 }

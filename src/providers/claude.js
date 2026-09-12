@@ -5,8 +5,17 @@
  * Required: the OAuth beta header; a plain Bearer token is rejected without it.
  * Windows: `five_hour` and `seven_day`, each `{ utilization, resets_at }`.
  *
- * No refresh is attempted: Anthropic rotates the refresh token, so refreshing
- * here would invalidate the copy Pi has stored.
+ * Two sources feed this provider, and the caller picks one:
+ *
+ *   - Pi's own `anthropic` entry in auth.json;
+ *   - the Claude Code CLI store (`~/.claude/.credentials.json`), which the
+ *     `pi-claude-code-provider` package drives. On a subscription whose usage
+ *     credits are disabled, Pi's own entry can answer HTTP 400 for every request,
+ *     and this is the source that still works.
+ *
+ * Either way no refresh is attempted. Anthropic rotates refresh tokens, so
+ * refreshing here would invalidate the copy the owning tool has stored — and for
+ * Claude Code that tool is the installed CLI, which keeps its own token fresh.
  */
 
 import { degradedResult, buildWindow, clampPercent, displayIdentity, finiteNumber, parseReset, stringValue } from "../model.js";
@@ -104,16 +113,25 @@ function formatOverage(extra) {
  */
 export async function fetchQuota(credential, options = {}) {
   const now = options.now ?? Date.now();
+  const fromClaudeCode = credential.sourceKind === "claude-code";
   const base = {
     family: "claude",
-    label: "Claude (Pi)",
+    // The label never changes: it marks the card as ours in Moshi, and which
+    // store was read is reported by `sourceKind` instead, where it is diagnostic.
+    label: credential.label ?? "Claude (Pi)",
     account: displayIdentity(credential),
     source: credential.source,
+    sourceKind: credential.sourceKind ?? "pi",
     expiresInMin: options.expiresInMin ?? null,
   };
 
   if (!credential.access) {
-    return degradedResult({ ...base, error: "Pi store has no anthropic access token; run /login anthropic in Pi" });
+    return degradedResult({
+      ...base,
+      error: fromClaudeCode
+        ? `Claude Code store has no access token; run \`claude\` once to sign in (${credential.source})`
+        : "Pi store has no anthropic access token; run /login anthropic in Pi",
+    });
   }
 
   const response = await requestJson(USAGE_URL, {
@@ -128,7 +146,9 @@ export async function fetchQuota(credential, options = {}) {
 
   if (!response.ok) {
     const error = response.authError
-      ? "Claude token expired or rejected; use any Claude model in Pi to refresh it"
+      ? fromClaudeCode
+        ? "Claude Code token expired or rejected; run `claude` once to refresh it"
+        : "Claude token expired or rejected; use any Claude model in Pi to refresh it"
       : `Claude usage request failed: ${response.error}`;
     return degradedResult({ ...base, error });
   }
@@ -163,7 +183,9 @@ export async function fetchQuota(credential, options = {}) {
 
   return {
     ...base,
-    plan: null,
+    // Claude Code reports the subscription tier it signed in with; Pi's own entry
+    // carries no plan field at all.
+    plan: credential.planType ?? null,
     windows,
     error: null,
     ok: true,

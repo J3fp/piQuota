@@ -14,6 +14,8 @@
 | **OpenCode via Chromium** | Plaintext SQLite / Keyring | ⚠️ Encrypted with Windows DPAPI (use Firefox or `--paste`) | ⚠️ Encrypted with macOS Keychain (use Firefox or `--paste`) | ⚠️ Encrypted with DPAPI (use Firefox or `--paste`) |
 | **Moshi Background Service** | `systemctl --user` | `systemctl --user` (requires WSL2 systemd enabled) | `launchd` plist agent | Task Scheduler / terminal loop |
 | **Pi `auth.json` lookup** | `~/.pi/agent/auth.json` | `~/.pi/agent/auth.json` + `/mnt/c/Users/...` (deduplicated) | `~/.pi/agent/auth.json` | `%USERPROFILE%\.pi\agent\auth.json` |
+| **Claude Code store** | `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`) | same, plus `/mnt/c/Users/<profile>/.claude/.credentials.json` | `~/.claude/.credentials.json` | `%USERPROFILE%\.claude\.credentials.json` |
+| **`moshi takeover` daemon restart** | `systemctl --user restart` | `systemctl --user restart` (needs systemd enabled) | ⚠️ manual — moshi-hook has no discoverable launchd label, so the CLI tells you to restart it | n/a (no systemd user session) |
 
 ---
 
@@ -83,6 +85,28 @@ This is the primary tested environment.
   * Use Windows Task Scheduler or run `node bin\piquota.js moshi watch` inside a background terminal or Windows Service wrapper (NSSM).
 
 ---
+
+## Claude Code as a second Claude source
+
+`npm:pi-claude-code-provider` never writes to Pi's auth store: it drives the
+installed `claude` executable, whose subscription token lives in Claude Code's own
+file. piQuota reads that file read-only and prefers it over Pi's own `anthropic`
+entry, which is what a user needs when Pi's entry answers `400` without usage
+credits.
+
+| Platform | Credential path | Notes |
+| --- | --- | --- |
+| Native Linux | `~/.claude/.credentials.json` | `CLAUDE_CONFIG_DIR` relocates it, and is honoured. |
+| WSL2 | `~/.claude/.credentials.json`, then `/mnt/c/Users/<profile>/.claude/.credentials.json` | The Linux-side store wins when both exist; discovery never spawns `cmd.exe`. |
+| macOS | `~/.claude/.credentials.json` | Same file, same format. |
+| Windows | `%USERPROFILE%\.claude\.credentials.json` | Run `piquota` from Windows only if Node >= 20 is on `PATH`. |
+
+Set `PI_QUOTA_CLAUDE_CODE_CREDENTIALS=/path/to/.credentials.json` to point at a
+specific file, or `PI_QUOTA_CLAUDE_SOURCE=pi` to ignore Claude Code entirely.
+
+> **The refresh token in that file is never read into memory.** Anthropic rotates
+> refresh tokens, so a rotation performed behind the CLI's back would sign the
+> installed `claude` out. It is Claude Code's token to refresh.
 
 ## Troubleshooting by Platform
 

@@ -9,6 +9,7 @@ import test from "node:test";
 import { bar, plainPalette, ringGlyph, thresholdKey } from "../src/render/theme.js";
 import {
   headlineWindow,
+  renderProviderLines,
   renderCompact,
   renderPanel,
   renderStatusLine,
@@ -176,4 +177,18 @@ test("an unrecognized window only wins when nothing better exists", () => {
     windows: [windowFixture({ id: "credits", label: "Credits", remainingPercent: null })],
   });
   assert.equal(headlineWindow(provider)?.id, "credits");
+});
+
+test("the panel names the Claude store that was actually read", () => {
+  const plainPaint = (key, text) => text;
+  const base = {
+    family: "claude", label: "Claude (Pi)", account: "fixture@example.com", plan: "pro",
+    windows: [], error: null, ok: true, updatedAt: "2030-01-01T00:00:00.000Z", source: "/tmp/x", expiresInMin: 60,
+  };
+
+  const fromCli = renderProviderLines({ ...base, sourceKind: "claude-code" }, plainPaint).join("\n");
+  assert.match(fromCli, /Claude Code CLI/);
+
+  const fromStore = renderProviderLines({ ...base, sourceKind: "pi" }, plainPaint).join("\n");
+  assert.equal(fromStore.includes("Claude Code CLI"), false, "Pi's own entry is the unremarkable default");
 });

@@ -3,7 +3,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +29,7 @@ function fullRoutes() {
 
 test("collectQuota reports all four families from the Pi store", async () => {
   const { fetchFn } = fullRoutes();
-  const report = await collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
+  const report = await collectQuota({ paths: [FIXTURE], claudeCodePaths: [], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
 
   assert.deepEqual(Object.keys(report.byFamily).sort(), ["antigravity", "claude", "codex", "opencode-go"]);
   assert.equal(report.readOnly, true);
@@ -46,7 +46,7 @@ test("collectQuota reports all four families from the Pi store", async () => {
 
 test("collectQuota marks a family with no credential as degraded, not missing", async () => {
   const { fetchFn } = fullRoutes();
-  const report = await collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, families: ["claude", "grok"], env: {}, stores: [], allowBrowser: false });
+  const report = await collectQuota({ paths: [FIXTURE], claudeCodePaths: [], now: NOW, fetchFn, families: ["claude", "grok"], env: {}, stores: [], allowBrowser: false });
   assert.equal(report.providers.length, 2);
   const grok = report.providers.find((provider) => provider.family === "grok");
   assert.ok(grok);
@@ -58,14 +58,14 @@ test("a crashing provider degrades instead of taking the report down", async () 
   const fetchFn = /** @type {typeof fetch} */ (async () => {
     throw new Error("socket exploded");
   });
-  const report = await collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, families: ["codex"], env: {}, stores: [], allowBrowser: false });
+  const report = await collectQuota({ paths: [FIXTURE], claudeCodePaths: [], now: NOW, fetchFn, families: ["codex"], env: {}, stores: [], allowBrowser: false });
   assert.equal(report.providers.length, 1);
   assert.equal(report.providers[0].ok, false);
 });
 
 test("the normalized report never contains token material", async () => {
   const { fetchFn } = fullRoutes();
-  const report = await collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
+  const report = await collectQuota({ paths: [FIXTURE], claudeCodePaths: [], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
   const serialized = JSON.stringify(report);
   for (const secret of ["sk-ant-oat01", "ya29.", "1//FAKE", "rt.1.FAKE", "sk-FAKE-zen", "fixture-signature"]) {
     assert.equal(serialized.includes(secret), false, `report leaked ${secret}`);
@@ -76,7 +76,7 @@ test("cache round-trips, respects the TTL and stores no secrets", async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-quota-cache-"));
   const path = join(directory, "usage.json");
   const { fetchFn } = fullRoutes();
-  const report = await collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
+  const report = await collectQuota({ paths: [FIXTURE], claudeCodePaths: [], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
 
   assert.equal(writeCache(report, { path, now: NOW }).ok, true);
   const hit = readCache({ path, now: NOW + 1000, ttlMs: 60_000 });
@@ -99,7 +99,7 @@ test("withCache refreshes once and then serves the cached copy", async () => {
   let loads = 0;
   const loader = async () => {
     loads += 1;
-    return collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
+    return collectQuota({ paths: [FIXTURE], claudeCodePaths: [], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
   };
 
   const first = await withCache({ path, now: NOW, ttlMs: 60_000 }, loader);
@@ -114,7 +114,7 @@ test("withCache refreshes once and then serves the cached copy", async () => {
 
 test("the Moshi artifact uses moshi-hook field names and redacts identities", async () => {
   const { fetchFn } = fullRoutes();
-  const report = await collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
+  const report = await collectQuota({ paths: [FIXTURE], claudeCodePaths: [], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false });
   const artifact = buildArtifact(report);
 
   assert.equal(artifact.readOnly, true);
@@ -186,4 +186,99 @@ test("the terminal surface also shows last known values while a provider is thro
   assert.equal(report.providers[0].ok, true, "the terminal must not show n/a while merely throttled");
   assert.equal(report.providers[0].windows[0].remainingPercent, 96);
   assert.match(report.providers[0].note ?? "", /last known values, 1 min old/);
+});
+
+test("the Claude Code CLI source wins over Pi's own anthropic entry when both exist", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-quota-claude-src-"));
+  const usersRoot = join(home, "no-windows-profiles");
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  writeFileSync(
+    join(home, ".claude", ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-FAKE-claude-code", expiresAt: NOW + 3_600_000, subscriptionType: "max" } }),
+  );
+
+  const { fetchFn, calls } = fullRoutes();
+  const report = await collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, families: ["claude"], env: {}, home, usersRoot, stores: [], allowBrowser: false });
+
+  const claude = report.providers[0];
+  assert.equal(claude.ok, true);
+  assert.equal(claude.sourceKind, "claude-code");
+  assert.equal(claude.plan, "max");
+  assert.equal(claude.label, "Claude (Pi)", "the label never reveals which source was used");
+  assert.equal(calls[0].init.headers.Authorization, "Bearer sk-ant-oat01-FAKE-claude-code");
+});
+
+test("with no Claude Code store, Pi's own anthropic entry is used", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-quota-claude-src-"));
+  const usersRoot = join(home, "no-windows-profiles");
+  const { fetchFn, calls } = fullRoutes();
+  const report = await collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, families: ["claude"], env: {}, home, usersRoot, stores: [], allowBrowser: false });
+
+  const claude = report.providers[0];
+  assert.equal(claude.ok, true);
+  assert.equal(claude.sourceKind, "pi");
+  assert.equal(calls[0].init.headers.Authorization, "Bearer sk-ant-oat01-FAKE-access-for-fixtures-only");
+});
+
+test("an expired Claude Code token is not silently replaced by Pi's anthropic token", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-quota-claude-src-"));
+  const usersRoot = join(home, "no-windows-profiles");
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  writeFileSync(
+    join(home, ".claude", ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-FAKE-expired", expiresAt: NOW - 60_000, subscriptionType: "pro" } }),
+  );
+
+  const { fetchFn, calls } = fullRoutes();
+  const report = await collectQuota({ paths: [FIXTURE], now: NOW, fetchFn, families: ["claude"], env: {}, home, usersRoot, stores: [], allowBrowser: false });
+
+  assert.equal(report.providers[0].sourceKind, "claude-code", "the preferred source is the only one tried");
+  assert.equal(calls[0].init.headers.Authorization, "Bearer sk-ant-oat01-FAKE-expired");
+  assert.ok(report.warnings.some((warning) => /claude: the Claude Code token expired/.test(warning)));
+});
+
+test("PI_QUOTA_CLAUDE_SOURCE=pi overrides the default preference", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-quota-claude-src-"));
+  const usersRoot = join(home, "no-windows-profiles");
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  writeFileSync(
+    join(home, ".claude", ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-FAKE-claude-code", expiresAt: NOW + 3_600_000 } }),
+  );
+
+  const { fetchFn, calls } = fullRoutes();
+  const report = await collectQuota({
+    paths: [FIXTURE], now: NOW, fetchFn, families: ["claude"], env: { PI_QUOTA_CLAUDE_SOURCE: "pi" }, home, usersRoot, stores: [], allowBrowser: false,
+  });
+
+  assert.equal(report.providers[0].sourceKind, "pi");
+  assert.equal(calls[0].init.headers.Authorization, "Bearer sk-ant-oat01-FAKE-access-for-fixtures-only");
+});
+
+test("PI_QUOTA_CLAUDE_SOURCE=claude-code never falls back to the Pi store", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-quota-claude-src-"));
+  const usersRoot = join(home, "no-windows-profiles");
+  const { fetchFn, calls } = fullRoutes();
+  const report = await collectQuota({
+    paths: [FIXTURE], now: NOW, fetchFn, families: ["claude"], env: { PI_QUOTA_CLAUDE_SOURCE: "claude-code" }, home, usersRoot, stores: [], allowBrowser: false,
+  });
+
+  assert.equal(report.providers[0].ok, false);
+  assert.equal(calls.length, 0, "no request is made when the requested source is missing");
+  assert.match(report.providers[0].error, /Claude Code/);
+});
+
+test("neither Claude source configured degrades as not-configured, not as a failure", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-quota-claude-src-"));
+  const usersRoot = join(home, "no-windows-profiles");
+  const emptyStore = join(home, "empty-auth.json");
+  writeFileSync(emptyStore, "{}");
+
+  const { fetchFn } = fullRoutes();
+  const report = await collectQuota({ paths: [emptyStore], claudeCodePaths: [], now: NOW, fetchFn, families: ["claude"], env: {}, home, usersRoot, stores: [], allowBrowser: false });
+
+  const claude = report.providers[0];
+  assert.equal(claude.ok, false);
+  assert.equal(claude.notConfigured, true);
+  assert.match(claude.error, /no claude credential/);
 });

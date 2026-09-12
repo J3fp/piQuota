@@ -119,6 +119,9 @@ export function renderProviderLines(provider, paint, contentWidth = MAX_WIDTH) {
 
   const meta = [provider.account];
   if (provider.plan) meta.push(`plan ${provider.plan}`);
+  // Claude has two stores, and a broken one is the first thing to rule out when
+  // the percentage looks wrong, so the panel names the store it actually read.
+  if (provider.sourceKind === "claude-code") meta.push("Claude Code CLI");
   if (provider.expiresInMin !== null && provider.expiresInMin <= 120) {
     meta.push(provider.expiresInMin < 0 ? "token EXPIRED" : `token ${provider.expiresInMin}m`);
   }

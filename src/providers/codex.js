@@ -74,6 +74,7 @@ export async function fetchQuota(credential, options = {}) {
     account: displayIdentity({ ...credential, accountId }),
     plan: credential.planType,
     source: credential.source,
+    sourceKind: credential.sourceKind ?? "pi",
     expiresInMin: options.expiresInMin ?? null,
   };
 

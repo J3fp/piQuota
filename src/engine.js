@@ -7,6 +7,7 @@
  */
 
 import { checkFreshness, LABEL_BY_FAMILY, loadPiCredentials, resolveAuthPaths } from "./auth/pi-auth.js";
+import { loadClaudeCodeCredential } from "./auth/claude-code-auth.js";
 import { degradedResult, displayIdentity, selectPrimaryWindow } from "./model.js";
 import { backoffState, clearBackoff, isThrottled, recordBackoff, retryAfterFromError } from "./providers/backoff.js";
 import { fetchQuota as fetchClaude } from "./providers/claude.js";
@@ -16,6 +17,64 @@ import { fetchQuota as fetchOpenCodeGo } from "./providers/opencode-go.js";
 
 /** Canonical family order used by every surface. */
 export const FAMILIES = ["claude", "codex", "antigravity", "opencode-go"];
+
+/**
+ * Claude has two possible sources, and a user may have either or both.
+ *
+ * `auto` prefers the Claude Code CLI, because the plugin that drives it is what a
+ * user reaches for when Pi's own `anthropic` token cannot serve requests. The
+ * choice is a preference, never a fallback: only the selected source is tried, so
+ * a broken preferred source is reported instead of silently masked by the other.
+ */
+export const CLAUDE_SOURCE_MODES = ["auto", "claude-code", "pi"];
+
+/**
+ * @param {unknown} value
+ * @returns {"auto" | "claude-code" | "pi"}
+ */
+export function normalizeClaudeSourceMode(value) {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (text === "claude-code" || text === "claude" || text === "cli") return "claude-code";
+  if (text === "pi" || text === "anthropic" || text === "oauth") return "pi";
+  return "auto";
+}
+
+/**
+ * Pick the Claude credential set for this run.
+ *
+ * @param {{
+ *   credentials: import("./auth/pi-auth.js").PiCredential[],
+ *   env: Record<string, string | undefined>,
+ *   home?: string,
+ *   platform?: string,
+ *   usersRoot?: string,
+ *   claudeCodePaths?: string[] | null,
+ * }} input
+ * @returns {{ credentials: import("./auth/pi-auth.js").PiCredential[], mode: string, unavailable: string | null, claudeCodePaths: string[] }}
+ */
+export function resolveClaudeCredentials(input) {
+  const mode = normalizeClaudeSourceMode(input.env.PI_QUOTA_CLAUDE_SOURCE);
+  const fromPi = input.credentials.filter((credential) => credential.family === "claude");
+  const claudeCodePaths = input.claudeCodePaths === undefined ? undefined : input.claudeCodePaths;
+
+  if (mode === "pi") return { credentials: fromPi, mode, unavailable: null, claudeCodePaths: claudeCodePaths ?? [] };
+
+  const claudeCode = loadClaudeCodeCredential({
+    env: input.env,
+    home: input.home,
+    platform: input.platform,
+    usersRoot: input.usersRoot,
+    paths: claudeCodePaths ?? undefined,
+  });
+
+  if (claudeCode.ok) {
+    return { credentials: [claudeCode.credential], mode: "claude-code", unavailable: null, claudeCodePaths: claudeCode.paths };
+  }
+  if (mode === "claude-code") {
+    return { credentials: [], mode, unavailable: claudeCode.error, claudeCodePaths: claudeCode.paths };
+  }
+  return { credentials: fromPi, mode: "pi", unavailable: null, claudeCodePaths: claudeCode.paths };
+}
 
 /** @type {Record<string, (credential: any, options?: any) => Promise<import("./model.js").QuotaResult>>} */
 const PROVIDERS = {
@@ -51,6 +110,7 @@ const PROVIDERS = {
  *   refresh?: boolean,
  *   stores?: import("./browser/cookies.js").CookieStore[],
  *   allowBrowser?: boolean,
+ *   claudeCodePaths?: string[] | null,
  * }} [options]
  * @returns {Promise<PiQuotaReport>}
  */
@@ -67,6 +127,24 @@ export async function collectQuota(options = {}) {
     paths: options.paths,
   });
 
+  // Claude is the one family with a second, non-Pi source, so it is resolved
+  // before the per-family loop and then treated exactly like any other credential.
+  const claude = resolveClaudeCredentials({
+    credentials: loaded.credentials,
+    env,
+    home: options.home,
+    platform: options.platform,
+    usersRoot: options.usersRoot,
+    claudeCodePaths: options.claudeCodePaths,
+  });
+
+  /**
+   * @param {string} family
+   * @returns {import("./auth/pi-auth.js").PiCredential[]}
+   */
+  const credentialsFor = (family) =>
+    family === "claude" ? claude.credentials : loaded.credentials.filter((credential) => credential.family === family);
+
   /** @type {Record<string, import("./model.js").QuotaResult[]>} */
   const byFamily = {};
   /** @type {string[]} */
@@ -74,13 +152,17 @@ export async function collectQuota(options = {}) {
 
   await Promise.all(
     families.map(async (family) => {
-      const credentials = loaded.credentials.filter((credential) => credential.family === family);
+      const credentials = credentialsFor(family);
       if (credentials.length === 0) {
+        // `notConfigured` is stated rather than inferred: the message now names a
+        // second source, and every renderer keys off this flag to avoid painting a
+        // failure icon for a provider the user simply does not use.
         byFamily[family] = [
           degradedResult({
             family,
             label: LABEL_BY_FAMILY[family] ?? family,
-            error: `no ${family} credential in the Pi store`,
+            error: claude.unavailable && family === "claude" ? claude.unavailable : missingCredentialMessage(family),
+            notConfigured: true,
             source: loaded.paths[0] ?? resolveAuthPaths({ env, home: options.home })[0] ?? "~/.pi/agent/auth.json",
             now,
           }),
@@ -114,7 +196,7 @@ export async function collectQuota(options = {}) {
         const freshness = checkFreshness(credential, now);
         if (!freshness.fresh) {
           warnings.push(
-            `${family}: Pi token expired ${Math.abs(freshness.expiresInMin ?? 0)}m ago; use that provider in Pi to refresh it`,
+            `${family}: the ${expiredTokenName(credential)} expired ${Math.abs(freshness.expiresInMin ?? 0)}m ago; ${refreshHint(credential)}`,
           );
         }
         const fetchQuota = PROVIDERS[family];
@@ -175,10 +257,41 @@ export async function collectQuota(options = {}) {
     readOnly: true,
     generatedAt: new Date(now).toISOString(),
     sources: loaded.paths,
+    // Named so `piquota --explain` can state which Claude source was chosen and
+    // every surface agrees, instead of each one guessing.
+    claudeSource: { mode: claude.mode, paths: claude.claudeCodePaths, unavailable: claude.unavailable },
     warnings,
     providers,
     byFamily,
   };
+}
+
+/**
+ * @param {string} family
+ * @returns {string}
+ */
+function missingCredentialMessage(family) {
+  return family === "claude"
+    ? "no claude credential in the Pi store or from the Claude Code CLI"
+    : `no ${family} credential in the Pi store`;
+}
+
+/**
+ * @param {{ sourceKind?: string }} credential
+ * @returns {string}
+ */
+function expiredTokenName(credential) {
+  return credential.sourceKind === "claude-code" ? "Claude Code token" : "Pi token";
+}
+
+/**
+ * @param {{ sourceKind?: string }} credential
+ * @returns {string}
+ */
+function refreshHint(credential) {
+  return credential.sourceKind === "claude-code"
+    ? "run `claude` once to refresh it"
+    : "use that provider in Pi to refresh it";
 }
 
 /**

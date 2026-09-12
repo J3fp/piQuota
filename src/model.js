@@ -29,6 +29,7 @@
  * @property {boolean} ok
  * @property {string} updatedAt            ISO timestamp.
  * @property {string} source               Credential source description.
+ * @property {"pi" | "claude-code"} [sourceKind]  Which kind of store produced it.
  * @property {string | null} expiresInMin  Credential freshness, when known.
  */
 
@@ -249,6 +250,7 @@ export function degradedResult(input) {
     notConfigured,
     updatedAt: new Date(input.now ?? Date.now()).toISOString(),
     source: input.source,
+    sourceKind: input.sourceKind,
     expiresInMin: input.expiresInMin ?? null,
   };
 }

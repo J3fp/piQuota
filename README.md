@@ -32,7 +32,7 @@ shuvquota, and it never writes to a credential file.
 
 | Provider | Source | Endpoint | Result |
 | --- | --- | --- | --- |
-| Claude | `anthropic.access` | `GET api.anthropic.com/api/oauth/usage` | ✅ 5h + weekly |
+| Claude | Claude Code CLI store, else `anthropic.access` | `GET api.anthropic.com/api/oauth/usage` | ✅ 5h + weekly + plan |
 | Codex | `openai-codex.access` + `accountId` | `GET chatgpt.com/backend-api/wham/usage` | ✅ 5h + weekly + plan |
 | Antigravity | `antigravity.access` + `projectId` | `POST cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` | ✅ Gemini + Claude/GPT buckets, **with in-memory refresh** |
 | OpenCode Go | opencode.ai session cookie | `GET opencode.ai/workspace/<id>/go` | ✅ weekly + monthly, verified live |
@@ -50,6 +50,29 @@ Three findings worth recording, each of which cost a wrong hypothesis:
    (`claude-code`, `codex`, `opencode`, `kimi`, `grok`, `antigravity`). A custom
    `"pi"` agent is rejected with HTTP 422, so the Pi provenance is carried by
    `accountLabel` (`"Codex (Pi)"`) and the card keeps Moshi's own logo.
+4. **Both Claude OAuth stores answer the same endpoint.** Pi's own `anthropic`
+   entry and the Claude Code CLI store return identical windows, which is what
+   makes the second source a drop-in replacement rather than a separate feature.
+
+### Claude has two sources
+
+There are two ways to be signed in to Claude, and a user may have either or both:
+
+| Source | Store | Why it exists |
+| --- | --- | --- |
+| Claude Code CLI | `~/.claude/.credentials.json` (honours `CLAUDE_CONFIG_DIR`) | What `npm:pi-claude-code-provider` drives. A subscription with usage credits disabled answers `400` on Pi's own entry for every request, and this is the source that still works. |
+| Pi's own entry | `~/.pi/agent/auth.json` → `anthropic` | `/login anthropic` in Pi, without the plugin installed. |
+
+**The Claude Code CLI wins when both are present.** The choice is a *preference, not
+a fallback*: only the selected source is tried, so a broken preferred source is
+reported rather than silently masked by the other one. Override it with
+`PI_QUOTA_CLAUDE_SOURCE=pi` or `=claude-code`; `--explain` prints which one was used
+and why.
+
+The Claude Code store is opened read-only, and its refresh token is deliberately
+**never carried into memory**: Anthropic rotates refresh tokens, and a rotation
+performed behind the CLI's back would sign the installed `claude` out. Refresh, if
+any, stays the CLI's business.
 
 ## Prerequisites & Installation
 
@@ -235,14 +258,17 @@ extensions/quota-panel.ts      Pi TUI extension
 ## Tests
 
 ```bash
-node --test tests/*.test.mjs     # 97 tests, fake tokens only, no network
+node --test tests/*.test.mjs     # 144 tests, fake tokens only, no network
 ```
 
-Modules covered: `auth.json` parsing and de-duplication, the four providers
-(including the two Antigravity failures and the OpenCode degradation), the
-dashboard parser's three strategies, the Firefox cookie reader against a
-synthetic SQLite database, the Antigravity refresh (in-memory only), the Moshi
-payload/redaction/transport, the renderers, and the Pi extension contract.
+Modules covered: `auth.json` parsing and de-duplication, the Claude Code store
+(including that the refresh token never leaves it and that reading leaves the file
+byte-identical), Claude source precedence, the four providers (including the two
+Antigravity failures and the OpenCode degradation), the dashboard parser's three
+strategies, the Firefox cookie reader against a synthetic SQLite database, the
+Antigravity refresh (in-memory only), the Moshi takeover and daemon-restart
+helpers, the Moshi payload/redaction/transport, the renderers, and the Pi
+extension contract.
 
 ## Acknowledgments & Prior Art
 

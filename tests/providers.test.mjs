@@ -182,7 +182,7 @@ test("a throttled family is paused instead of hammered, and recovers", async () 
     return jsonResponse({ five_hour: { utilization: 4 }, seven_day: { utilization: 11 } });
   });
   const paused = await collectQuota({
-    paths: [FIXTURE], families: ["claude"], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false,
+    paths: [FIXTURE], claudeCodePaths: [], families: ["claude"], now: NOW, fetchFn, env: {}, stores: [], allowBrowser: false,
     home: dir,
   });
   assert.equal(paused.providers[0].ok, false);
@@ -190,7 +190,7 @@ test("a throttled family is paused instead of hammered, and recovers", async () 
   assert.equal(calls.length, 0, "the throttled family must not be called");
 
   const after = await collectQuota({
-    paths: [FIXTURE], families: ["claude"], now: NOW + 400_000, fetchFn, env: {}, stores: [], allowBrowser: false,
+    paths: [FIXTURE], claudeCodePaths: [], families: ["claude"], now: NOW + 400_000, fetchFn, env: {}, stores: [], allowBrowser: false,
     home: dir,
   });
   assert.equal(after.providers[0].ok, true);

@@ -195,6 +195,33 @@ case ":$PATH:" in
   *) warn "$BIN_DIR is not on PATH; add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
 
+# --- Claude source Detection ---
+PI_AUTH="$HOME/.pi/agent/auth.json"
+CLAUDE_CODE_CREDS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+PI_ANTHROPIC="no"
+CLAUDE_CODE="no"
+
+if [[ -f "$PI_AUTH" ]] && grep -q '"anthropic"' "$PI_AUTH" 2>/dev/null; then
+  PI_ANTHROPIC="yes"
+fi
+if [[ -f "$CLAUDE_CODE_CREDS" ]] && grep -q 'claudeAiOauth' "$CLAUDE_CODE_CREDS" 2>/dev/null; then
+  CLAUDE_CODE="yes"
+fi
+
+if [[ "$CLAUDE_CODE" == "yes" ]]; then
+  ok "Claude Code store found: $CLAUDE_CODE_CREDS (preferred Claude source)"
+  log "            piQuota reads it read-only and never touches its refresh token."
+elif [[ "$PI_ANTHROPIC" == "yes" ]]; then
+  log "Claude: using Pi's own \`anthropic\` entry (no Claude Code CLI store found)"
+else
+  warn "Claude: no credential found (neither Pi's \`anthropic\` entry nor a Claude Code store)"
+  log "        log in with \`/login anthropic\` in Pi, or install Claude Code and run \`claude\`"
+fi
+
+if [[ "$CLAUDE_CODE" == "yes" && "$PI_ANTHROPIC" == "yes" ]]; then
+  log "        Both sources exist; the Claude Code CLI wins. Override with PI_QUOTA_CLAUDE_SOURCE=pi"
+fi
+
 # --- Moshi Detection ---
 if command -v moshi-hook >/dev/null 2>&1; then
   MOSHI_VER="$(moshi-hook version 2>/dev/null | head -1 || echo "detected")"
@@ -225,5 +252,6 @@ log "piquota --explain      # verify credential store resolution"
 log "piquota                # test the CLI panel"
 log "piquota auth status    # check OpenCode Go session discovery"
 log "piquota moshi status   # check Moshi integration status"
+log "piquota moshi takeover # make piQuota the only usage publisher (removes duplicate cards)"
 log "/quota                 # reload or start Pi and run inside TUI"
 echo

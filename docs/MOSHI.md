@@ -93,6 +93,52 @@ card is stable across runs and never derived from a secret.
 pauses when collection is off (`on`/`off`/`true`/`false`/duration are all
 understood). `--force` overrides it for a single artifact write.
 
+The one exception is a takeover, which is recorded explicitly rather than inferred
+from the setting.
+
+## Taking over from moshi-hook's own poller
+
+moshi-hook ships a background usage poller that reads each agent's CLI-owned
+credential file. Installing Claude Code is enough to activate it, and it then
+publishes its own Claude card — `claude:<hash-of-accountUuid>` with the label
+`Pro (j•••@g•••.com)` — next to the one piQuota publishes under `pi:claude`. Two
+cards for one account is the symptom.
+
+`piquota moshi takeover` removes the duplicate:
+
+1. `moshi-hook set usage-collection off`, through moshi-hook's own CLI. Its
+   `config.toml` is never edited directly, so comments and unknown keys survive.
+2. The intent is recorded in `~/.local/state/pi-quota/moshi-takeover.json` (mode
+   `0600`), including the previous value. Without that record, reading
+   `usage_collection = false` would look like an instruction to stop publishing —
+   which is exactly what it used to mean.
+3. The daemon is restarted, because moshi-hook reads the setting only at startup.
+   It has no `service restart` subcommand: asking for one prints help and exits
+   `0`, so the restart goes through `systemctl --user` and the result is checked.
+4. The new value is confirmed from the daemon's own startup banner, which is the
+   only place moshi-hook states what it actually loaded. A restart returns before
+   that line is written, so the confirmation waits for a banner *newer than the
+   restart* instead of reporting the previous value.
+
+`piquota moshi release` restores the recorded value, removes the record, restarts
+the daemon, and confirms again.
+
+### What a takeover does and does not change
+
+| Surface | Effect |
+| --- | --- |
+| moshi-hook's usage poller | **Stops.** That is the point. |
+| moshi-hook's socket and WebSocket bridge (approvals, notifications) | **Untouched.** Verified: with `usageCollection=false` the daemon still logs `socket listening` and `ws bridge connected`. |
+| Claude Code's rate-limit notices inside Pi | **Untouched.** They come from `pi-claude-code-provider` reading `rate_limit_event` from `claude -p`, not from moshi-hook. |
+| Consumption-alert rules bound to the previous card | **Must be re-enabled in the app.** piQuota's cards use its own account ids (`pi:<family>`), so they are new cards by construction. The previous one is left behind. |
+
+The identity question was examined and deliberately settled this way. moshi-hook
+derives `claude:<accountId>` as `sha256(oauthAccount.accountUuid)[:12]` from
+`~/.claude.json` — reproducible, and confirmed against the installed binary's own
+`claude-identity.json`. piQuota could publish onto that same card and inherit its
+alert bindings, but it does not: a card that looks like moshi-hook's while being
+fed by something else is harder to reason about than an honestly separate one.
+
 ## Cadence and transient failures
 
 Two mechanisms keep the cards from flickering:

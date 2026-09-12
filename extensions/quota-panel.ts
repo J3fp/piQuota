@@ -51,6 +51,7 @@ type QuotaProvider = {
   error: string | null;
   ok: boolean;
   notConfigured?: boolean;
+  sourceKind?: "pi" | "claude-code";
   updatedAt: string;
   expiresInMin: number | null;
 };
@@ -231,6 +232,8 @@ function renderPanel(report: QuotaReport, theme: Theme): string[] {
     const name = paint(BRAND[provider.family] ?? "#8B949E", provider.label);
     const meta = [provider.account];
     if (provider.plan) meta.push(`plan ${provider.plan}`);
+    // Two stores can back Claude, and this is the one place that says which.
+    if (provider.sourceKind === "claude-code") meta.push("Claude Code CLI");
     if (provider.expiresInMin !== null && provider.expiresInMin <= 120) {
       meta.push(
         provider.expiresInMin < 0
