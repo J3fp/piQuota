@@ -235,7 +235,7 @@ extensions/quota-panel.ts      Pi TUI extension
 ## Tests
 
 ```bash
-node --test tests/*.test.mjs     # 89 tests, fake tokens only, no network
+node --test tests/*.test.mjs     # 97 tests, fake tokens only, no network
 ```
 
 Modules covered: `auth.json` parsing and de-duplication, the four providers
@@ -243,3 +243,10 @@ Modules covered: `auth.json` parsing and de-duplication, the four providers
 dashboard parser's three strategies, the Firefox cookie reader against a
 synthetic SQLite database, the Antigravity refresh (in-memory only), the Moshi
 payload/redaction/transport, the renderers, and the Pi extension contract.
+
+## Acknowledgments & Prior Art
+
+* **[shuvquota](https://github.com/shuv1337/shuvquota)** by [@shuv1337](https://github.com/shuv1337):
+  Huge credit to `shuvquota` for pioneering multi-provider terminal quota monitoring across AI services. Its approach to rate-limit endpoints, dashboard parsing patterns for OpenCode Go, and terminal quota concepts served as inspiration for this project.
+
+  `piQuota` was built as a standalone, strictly read-only implementation designed specifically around [Pi Coding Agent](https://github.com/earendil-works/pi) credentials (`~/.pi/agent/auth.json`), Gentle AI orchestration, and direct Moshi mobile synchronization.
