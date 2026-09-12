@@ -85,18 +85,39 @@ Codex JWT **payload** only (signature never verified, token never disclosed):
 > These claim keys contain dots, so the reader navigates an explicit key list
 > (`src/auth/jwt.js`) and never a dotted path.
 
+## Environment overrides
+
+| Variable | Effect |
+| --- | --- |
+| `PI_QUOTA_AUTH_PATH`, `PI_AUTH_PATH` | replace the Pi store path |
+| `PI_QUOTA_CLAUDE_CODE_CREDENTIALS` | replace the Claude Code credential file |
+| `PI_QUOTA_CLAUDE_SOURCE` | `auto` (default, prefers Claude Code), `claude-code`, or `pi` |
+| `CLAUDE_CONFIG_DIR` | Claude Code's own relocation variable, honoured as-is |
+| `OPENCODE_GO_AUTH_COOKIE`, `OPENCODE_GO_WORKSPACE_ID` | supply the opencode.ai session directly |
+| `MOSHI_API_BASE` | override the paired-host base URL |
+| `MOSHI_SOCKET_PATH` | where the approval mirror dials the daemon |
+| `ANTIGRAVITY_CLIENT_ID`, `ANTIGRAVITY_CLIENT_SECRET` | override the public Google client |
+| `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` | relocate the cache, state and cookie file |
+| `NO_COLOR`, `TERM=dumb` | drop ANSI colour from every surface |
+
 ## Refresh policy
 
 | Provider | Rotates `refresh`? | Refresh here? | On expiry |
 | --- | --- | --- | --- |
-| Claude | yes | **never** | degrade: *use any Claude model in Pi to refresh it* |
+| Claude (Pi's `anthropic` entry) | yes | **never** | degrade: *use any Claude model in Pi to refresh it* |
+| Claude (Claude Code CLI) | yes | **never, and the token is not even carried** | degrade: *run `claude` once to refresh it* |
 | Codex | yes | **never** | degrade: *use any Codex model in Pi to refresh it* |
 | Antigravity | no | **yes, in memory only** | transparent; nothing is preserved to disk |
 | OpenCode Go | n/a (API key) | n/a | n/a |
 
 Claude and OpenAI rotate the refresh token. Refreshing them here would invalidate
 Pi's stored copy and break Pi, so the provider degrades with an instruction
-instead. Google does not rotate this refresh token, which is what makes the
+instead.
+
+The Claude Code store gets a stronger rule than "do not refresh": its refresh token
+is **never read into memory at all**, so no later code path can act on it. `--explain`
+reports only whether one is present (`refresh token present: yes (never read, never
+used)`). Rotating it behind the CLI's back would sign the installed `claude` out. Google does not rotate this refresh token, which is what makes the
 Antigravity refresh safe; the client used is Google's public Antigravity desktop
 client, resolved from `ANTIGRAVITY_CLIENT_ID`/`SECRET`, else the installed
 `pi-antigravity` package, else the recorded fallback.

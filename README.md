@@ -10,6 +10,7 @@ shuvquota, and it never writes to a credential file.
 | Terminal | `piquota` · `piquota --json` · `piquota --status` |
 | Pi TUI | `/quota` · `/usage` |
 | Moshi Usages tab | `piquota moshi push` (or the `moshi watch` user service) |
+| Moshi notifications | `piquota moshi takeover` + the `moshi-approvals.ts` extension |
 
 ## Hard guarantees
 
@@ -22,11 +23,28 @@ shuvquota, and it never writes to a credential file.
   does not rotate that refresh token, so Pi's stored copy stays valid. Claude and
   Codex are never refreshed, because they **do** rotate and persisting a rotated
   token would break Pi.
+* The Claude Code store (`~/.claude/.credentials.json`) is opened read-only too, and
+  its refresh token is never even read into memory, so nothing here can rotate a
+  token the installed `claude` owns. `~/.claude.json` is read only for the account
+  e-mail and display name; its project history is never touched.
 * Browser cookie databases are copied to a private temp dir and opened
   read-only. This is only used to fetch the opencode.ai session cookie that Pi
   does not store.
 * `/quota` never injects quota into the LLM context: the extension only calls
   `ui.setStatus`, `ui.setWidget` and `ui.notify`.
+* Nothing is written outside these paths:
+
+  | Path | What |
+  | --- | --- |
+  | `~/.cache/pi-quota/usage.json` | the report cache (60 s TTL) |
+  | `~/.cache/pi-quota/last-published.json`, `last-good.json`, `backoff.json` | sticky snapshots and throttle state |
+  | `~/.local/state/pi-quota/moshi-usage.json` | the local Moshi-shaped artifact |
+  | `~/.local/state/pi-quota/moshi-takeover.json` | only after `piquota moshi takeover` |
+  | `~/.config/pi-quota/opencode-cookie` | only after `piquota auth opencode`, mode `600` |
+  | `~/.pi/agent/extensions/*.ts` | only by `install.sh` |
+
+  `~/.config/moshi/config.toml` is changed **only** through moshi-hook's own CLI
+  (`moshi-hook set`), never by editing the file.
 
 ## Status, verified against the live APIs
 
@@ -37,7 +55,7 @@ shuvquota, and it never writes to a credential file.
 | Antigravity | `antigravity.access` + `projectId` | `POST cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` | ✅ Gemini + Claude/GPT buckets, **with in-memory refresh** |
 | OpenCode Go | opencode.ai session cookie | `GET opencode.ai/workspace/<id>/go` | ✅ weekly + monthly, verified live |
 
-Three findings worth recording, each of which cost a wrong hypothesis:
+Four findings worth recording, each of which cost a wrong hypothesis:
 
 1. **Antigravity needs the CLI `User-Agent`.** Without
    `User-Agent: antigravity/cli/...` the backend answers
@@ -83,7 +101,9 @@ any, stays the CLI's business.
   - Install daemon & CLI: `curl -fsSL https://getmoshi.app/install | bash`
   - Pair your host: `moshi-hook pair`
   - Run daemon: `moshi-hook service install` or `moshi-hook serve`
-  - *(Without Moshi, `piquota` in terminal and the Pi TUI extension work 100% locally)*.
+  - *(Without Moshi the CLI, the TUI line and every report still work fully locally;
+    only the phone cards and the approval mirror need it. `install.sh` skips the
+    mirror when `moshi-hook` is absent.)*
 * Platform support: Linux, WSL2, macOS. See [docs/OS-COMPATIBILITY.md](docs/OS-COMPATIBILITY.md) for OS-specific details.
 
 ### 1-Line Quick Install
@@ -100,18 +120,29 @@ cd piQuota
 ./install.sh              # --link for development, --uninstall to remove
 ```
 
-No sudo. Copies the project to `~/.local/share/pi-quota`, symlinks
-`~/.local/bin/piquota`, installs the Pi extension, and removes the previous
-generation's `shuvquota` shim so upstream `/usr/bin/shuvquota` is reachable again.
+No sudo. It validates Node, Pi and Gentle AI, reports which Claude source it found,
+copies the project to `~/.local/share/pi-quota`, symlinks `~/.local/bin/piquota`,
+installs both Pi extensions (the approval mirror only when `moshi-hook` is present),
+and removes the previous generation's `shuvquota` shim so upstream `/usr/bin/shuvquota`
+is reachable again.
 
 ## Commands
 
 ```bash
 piquota                 # boxed panel: ring, bar, % left, "reset in 3h 12m"
+piquota claude codex    # only these families
 piquota --json          # normalized report
 piquota --compact       # one line per provider
 piquota --status        # single line with rings, for status bars
 piquota --explain       # which stores and fields are read (names only)
+piquota --clear-cache   # delete the cache and exit
+piquota --no-color      # plain output
+piquota --ttl 300       # cache TTL in seconds (default 60)
+piquota --timeout 5000  # per-request timeout in ms (default 15000)
+piquota --no-cache      # ignore the cache entirely
+piquota --force         # ignore a still-fresh cache entry
+piquota --no-refresh    # never refresh Antigravity's token in memory
+piquota --version       # the version this binary reports
 
 piquota auth status             # every credential source, including opencode.ai
 piquota auth opencode           # open the login in Firefox and capture the session
@@ -119,11 +150,13 @@ piquota auth opencode --paste   # read the cookie from stdin instead
 piquota auth opencode --no-browser
 piquota auth opencode --wait 300
 
-piquota moshi status            # pairing + usage-collection state
+piquota moshi status            # pairing, publisher mode and usage-collection state
 piquota moshi push              # publish once to the paired host, then exit
-piquota moshi watch             # publish every 60s
-piquota moshi artifact          # write the local JSON artifact
+piquota moshi watch             # publish every 60s, refetch every 300s
+piquota moshi artifact          # write the local JSON artifact (--print for stdout)
 piquota moshi service install|uninstall|status
+piquota moshi takeover          # make these cards the only ones on the host
+piquota moshi release           # hand publishing back to moshi-hook
 ```
 
 Colours: green above 50% remaining, yellow 20–50%, red below 20%.
@@ -242,7 +275,9 @@ Authorization: Bearer secret_<host-secret>
 names are sent — never a credential or an e-mail address.
 
 The publisher respects moshi-hook's own `usage_collection` setting: if you turn
-collection off, `moshi watch` pauses instead of pushing behind your back.
+collection off, `moshi watch` pauses instead of pushing behind your back. The one
+exception is an explicit takeover, which is recorded rather than inferred — see
+[Taking over from moshi-hook's own poller](docs/MOSHI.md#taking-over-from-moshi-hooks-own-poller).
 
 `piquota moshi watch` decouples the two cadences: it **pushes every 60s** but only
 **refetches every 300s** (`--fetch-ttl`), so the provider APIs are not polled once
@@ -260,21 +295,30 @@ schema were recovered: [docs/MOSHI.md](docs/MOSHI.md).
 
 ```
 src/auth/pi-auth.js            read-only auth.json reader, WSL + Linux, deduplicated
+src/auth/claude-code-auth.js   read-only Claude Code store; never carries its refresh token
 src/auth/jwt.js                Codex JWT payload reader (claim keys contain dots)
 src/browser/cookies.js         read-only Firefox/Chromium cookie access via a temp copy
+src/browser/history.js         workspace ids recovered from a copied places.sqlite
 src/opencode/session.js        cookie + workspace resolution, dashboard fetch
 src/opencode/dashboard.js      three-strategy parser for the Go plan page
 src/providers/*.js             one file per provider; each degrades instead of throwing
 src/providers/antigravity-oauth.js  in-memory refresh with Google's public client
+src/providers/backoff.js       per-family throttle state
 src/moshi/client.js            paired-host publisher
 src/moshi/artifact.js          local Moshi-shaped artifact, identities redacted
-src/moshi/settings.js          reads moshi-hook's usage_collection setting
+src/moshi/sticky.js            last published / last good snapshots
+src/moshi/settings.js          moshi-hook's usage_collection, and the takeover override
+src/moshi/takeover.js          the publisher record, and moshi-hook's own `set` call
+src/moshi/daemon.js            daemon restart, and proof of the value it loaded
 src/engine.js                  collectQuota() -> one normalized report
 src/model.js                   window normalization, percent and reset parsing
 src/render/{theme,panel}.js    colors, thresholds, rings, bars, boxed panel
 src/cache.js                   60s TTL cache at ~/.cache/pi-quota/usage.json
+src/cli/args.js                argument parsing, and the flag/positional split
+src/exec.js                    the one place that spawns a foreign binary
+src/http.js                    fetch wrapper: timeouts, JSON, redaction
 bin/piquota.js                 the only CLI
-extensions/quota-panel.ts      Pi TUI extension
+extensions/quota-panel.ts      Pi TUI line and /quota
 extensions/moshi-approvals.ts  mirrors Pi's approval prompts to the phone
 ```
 
@@ -283,18 +327,26 @@ extensions/moshi-approvals.ts  mirrors Pi's approval prompts to the phone
 | Symptom | Cause and fix |
 | --- | --- |
 | `no <family> credential in the Pi store` | Not logged in to Pi for that provider. `/login <provider>` in Pi. |
+| `no claude credential in the Pi store or from the Claude Code CLI` | Neither Claude source is configured. `/login anthropic` in Pi, or install Claude Code and run `claude` once. |
+| `Claude Code CLI has no readable credentials; looked for …` | The store is missing, empty or corrupt. `piquota --explain` prints every path that was tried. |
+| `Claude Code token expired or rejected; run \`claude\` once` | Claude Code's own access token lapsed. Run any `claude` command; piQuota never refreshes it. |
+| Claude reports `plan pro` but the window looks wrong | The store is chosen by preference, not by success. `PI_QUOTA_CLAUDE_SOURCE=pi piquota` forces the other source. |
 | `rate limited (HTTP 429); retry in Ns` | The vendor throttled the usage endpoint. Wait, or raise `--ttl`. |
 | `Antigravity token rejected` | Refresh failed; `/login antigravity` in Pi. `--no-refresh` disables the attempt. |
 | `no "auth" cookie for opencode.ai in N readable store(s)` | Run `piquota auth opencode`, or paste the cookie. |
 | `only encrypted Chromium stores found` | Log in with Firefox; Chrome on Windows uses DPAPI. |
 | `moshi push failed: ... rejected the host secret` | `moshi-hook pair` again. |
+| Duplicate Claude or Codex cards on the phone | moshi-hook's own poller is also publishing. `piquota moshi takeover` stops it. |
+| `could not change moshi-hook's setting` | `moshi-hook` is not on `PATH`. The takeover prints the exact command to run by hand. |
+| `the daemon still reports usage-collection on` | A restart did not take. `systemctl --user restart moshi-hook.service` and check `piquota moshi status`. |
+| `unknown flag: --x` | The flag is a typo or was removed. `piquota --help` lists every flag. |
 | `moshi-hook is not paired` | Only `moshi artifact` works until you pair. |
 | `unknown argument` | `piquota --help` lists every flag. |
 
 ## Tests
 
 ```bash
-node --test tests/*.test.mjs     # 155 tests, fake tokens only, no network
+node --test tests/*.test.mjs     # 166 tests, fake tokens only, no network
 ```
 
 Modules covered: `auth.json` parsing and de-duplication, the Claude Code store
@@ -304,7 +356,8 @@ Antigravity failures and the OpenCode degradation), the dashboard parser's three
 strategies, the Firefox cookie reader against a synthetic SQLite database, the
 Antigravity refresh (in-memory only), the Moshi takeover and daemon-restart
 helpers, the Moshi payload/redaction/transport, the renderers, the Pi
-extension contract, and the approval mirror (through a real Unix socket).
+extension contract, the approval mirror (through a real Unix socket), and argument
+parsing including the two silent defects it once hid.
 
 ## Acknowledgments & Prior Art
 

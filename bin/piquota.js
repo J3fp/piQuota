@@ -38,7 +38,7 @@ import { confirmDaemonUsageCollection, resolveHookLogPath, restartMoshiDaemon } 
 import { describeClaudeCodeSource } from "../src/auth/claude-code-auth.js";
 import { loadLastPublished, mergeLastGood, mergeSticky, saveLastPublished } from "../src/moshi/sticky.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const OPENCODE_LOGIN_URL = "https://opencode.ai/auth";
 const WINDOWS_FIREFOX = [
   "/mnt/c/Program Files/Mozilla Firefox/firefox.exe",
@@ -65,7 +65,7 @@ const HELP = `piquota ${VERSION} — read-only quota from Pi's provider credenti
 Usage:
   piquota [families...] [flags]
   piquota auth <opencode|status> [flags]
-  piquota moshi <push|watch|artifact|status|service> [flags]
+  piquota moshi <push|watch|artifact|status|service|takeover|release> [flags]
 
 Quota:
   --json             Emit the normalized report as JSON
@@ -79,6 +79,7 @@ Quota:
   --no-refresh       Never refresh Antigravity's token in memory
   --explain          Show which stores/fields are read (names only)
   --clear-cache      Delete the local cache and exit
+  --version          Print the version and exit
 
 Auth (OpenCode Go session, the only credential Pi does not store):
   piquota auth opencode            open the login in Firefox and capture the cookie
@@ -90,9 +91,10 @@ Auth (OpenCode Go session, the only credential Pi does not store):
 
 Moshi:
   piquota moshi push               publish once to the paired host channel
-  piquota moshi watch              publish every --interval seconds (default 60)
+  piquota moshi watch              publish every --interval seconds (default 60),
+                                   refetching every --fetch-ttl seconds (default 300)
   piquota moshi artifact           write the local artifact (--print to stdout)
-  piquota moshi status             host pairing and usage-collection state
+  piquota moshi status             pairing, publisher mode and usage-collection state
   piquota moshi service install    run \`moshi watch\` as a systemd user service
   piquota moshi service uninstall  remove that service
   piquota moshi takeover           stop moshi-hook's own poller so only these cards exist
@@ -648,7 +650,9 @@ WantedBy=default.target
 async function main() {
   const argv = process.argv.slice(2);
   const args = parseArgs(argv);
-  const bare = argv.filter((value) => !value.startsWith("-"));
+  // Only real positionals: filtering the raw argv by "starts with a dash" also kept
+  // the *values* of value flags, so `--ttl 300` was read as a family named "300".
+  const bare = args.positionals;
   const command = bare[0] ?? null;
   const agentMode = "native";
   const refresh = !argv.includes("--no-refresh");
@@ -665,6 +669,14 @@ async function main() {
     const result = clearCache({});
     out(result.removed ? `cache cleared: ${result.path}` : `no cache at ${result.path}`);
     return 0;
+  }
+
+  // A flag nobody owns is a typo far more often than it is intentional, and
+  // silently ignoring it turns `--stauts` into a confusing no-op.
+  if (args.unknown.length > 0) {
+    err(`unknown flag: ${args.unknown.join(" ")}\n`);
+    process.stdout.write(HELP);
+    return 2;
   }
 
   if (command === "auth") {
@@ -699,6 +711,7 @@ async function main() {
       return 0;
     }
     err(`unknown moshi action: ${sub}`);
+    err("expected one of: push, watch, artifact, status, service, takeover, release");
     return 2;
   }
 

@@ -91,7 +91,10 @@ card is stable across runs and never derived from a secret.
 `moshi-hook set usage-collection off` must also silence this publisher, so
 `piquota moshi watch` reads `~/.config/moshi/config.toml` before every cycle and
 pauses when collection is off (`on`/`off`/`true`/`false`/duration are all
-understood). `--force` overrides it for a single artifact write.
+understood).
+
+The local artifact is **not** gated by it: `piquota moshi artifact` writes a file that
+never leaves the machine, so only the paired push and the watcher observe the setting.
 
 The one exception is a takeover, which is recorded explicitly rather than inferred
 from the setting.
