@@ -10,7 +10,7 @@
 #   2. detects operating system and platform nuances
 #   3. copies src/, bin/ and package.json to ~/.local/share/pi-quota
 #   4. symlinks ~/.local/bin/piquota
-#   5. installs extensions/quota-panel.ts into ~/.pi/agent/extensions
+#   5. installs extensions/*.ts into ~/.pi/agent/extensions
 #   6. cleans up obsolete shims if upgrading from previous versions
 
 set -euo pipefail
@@ -73,7 +73,7 @@ if [[ "$MODE" == "uninstall" ]]; then
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   fi
   rm -f "$BIN_DIR/piquota" "$BIN_DIR/shuvquota"
-  rm -f "$EXT_DIR/quota-panel.ts"
+  rm -f "$EXT_DIR/quota-panel.ts" "$EXT_DIR/moshi-approvals.ts"
   rm -rf "$PREFIX"
   ok "removed the tree, the shims, the Pi extension and background services"
   warn "credentials and settings were left untouched"
@@ -186,7 +186,15 @@ if [[ -L "$BIN_DIR/shuvquota" && "$(readlink -f "$BIN_DIR/shuvquota" 2>/dev/null
 fi
 
 cp "$HERE/extensions/quota-panel.ts" "$EXT_DIR/quota-panel.ts"
-ok "Pi TUI extension installed: $EXT_DIR/quota-panel.ts"
+ok "Pi TUI quota extension installed: $EXT_DIR/quota-panel.ts"
+
+# Approval mirroring only makes sense with a daemon to mirror to.
+if command -v moshi-hook >/dev/null 2>&1; then
+  cp "$HERE/extensions/moshi-approvals.ts" "$EXT_DIR/moshi-approvals.ts"
+  ok "Pi approval mirror installed: $EXT_DIR/moshi-approvals.ts"
+else
+  log "skipped the approval mirror: it needs moshi-hook as the daemon to send to"
+fi
 
 echo
 echo "--- Diagnostics & Integrations ---"

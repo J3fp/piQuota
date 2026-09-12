@@ -156,6 +156,27 @@ Two mechanisms keep the cards from flickering:
 Verified: a run right after a throttled Claude poll logs
 `published 4 provider(s) (cached)`.
 
+## Approvals and session notifications
+
+These are two different channels, and only one of them used to work.
+
+| Channel | Producer | Reaches the phone? |
+| --- | --- | --- |
+| Session started / task complete / session ended | moshi-hook's generated Pi extension | Yes |
+| Chat View state (model, context, cwd, pane) | same | Yes |
+| Rate-limit notices from Claude Code | `pi-claude-code-provider`, via `ctx.ui.notify` | No — they are in-Terminal by design |
+| **Approvals** | gentle-pi's guarded-command confirm | **Not until the approval mirror is installed** |
+
+The gap: gentle-pi emits `pi-permission-system:permission-request` on Pi's extension
+event bus and nothing listens. moshi-hook's generated extension has the envelope
+builder but no handler that calls it, and Pi does not expose a `PermissionRequest`
+lifecycle event. `extensions/moshi-approvals.ts` closes exactly that link and nothing
+else.
+
+A blocked Pi pane *does* show a state — but in Herdr's UI, which is a separate
+external manager consuming `herdr:blocked` directly. That is why the setup can feel
+wired while the phone stays silent.
+
 ## The local artifact
 
 `piquota moshi artifact` writes `~/.local/state/pi-quota/moshi-usage.json`
