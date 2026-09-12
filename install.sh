@@ -196,6 +196,16 @@ else
   log "skipped the approval mirror: it needs moshi-hook as the daemon to send to"
 fi
 
+# Replacing ~/.local/share/pi-quota leaves a running watcher executing the old code
+# from memory, so an upgrade would silently keep the previous cadence. Restart it.
+if command -v systemctl >/dev/null 2>&1; then
+  if [[ "$(systemctl --user is-active pi-quota-moshi.service 2>/dev/null)" == "active" ]]; then
+    systemctl --user restart pi-quota-moshi.service >/dev/null 2>&1 \
+      && ok "restarted pi-quota-moshi.service so the new code takes effect" \
+      || warn "pi-quota-moshi.service is running the previous code; run: systemctl --user restart pi-quota-moshi.service"
+  fi
+fi
+
 echo
 echo "--- Diagnostics & Integrations ---"
 case ":$PATH:" in
