@@ -56,6 +56,11 @@ Three findings worth recording, each of which cost a wrong hypothesis:
 * **Node.js >= 20.0.0** (native `node:sqlite` and global `fetch` support; zero npm dependencies).
 * **[Pi Coding Agent](https://github.com/earendil-works/pi)** (`pi`).
 * **[Gentle AI](https://github.com/Gentleman-Programming/gentle-pi)** (`gentle-pi`).
+* **[Moshi](https://getmoshi.app)** (`moshi-hook`) *(optional — only needed if syncing to the Moshi mobile app)*:
+  - Install daemon & CLI: `curl -fsSL https://getmoshi.app/install | bash`
+  - Pair your host: `moshi-hook pair`
+  - Run daemon: `moshi-hook service install` or `moshi-hook serve`
+  - *(Without Moshi, `piquota` in terminal and the Pi TUI extension work 100% locally)*.
 * Platform support: Linux, WSL2, macOS. See [docs/OS-COMPATIBILITY.md](docs/OS-COMPATIBILITY.md) for OS-specific details.
 
 ### 1-Line Quick Install

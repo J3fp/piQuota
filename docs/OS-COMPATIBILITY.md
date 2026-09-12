@@ -38,6 +38,7 @@ This is the primary tested environment.
 * **Prerequisites:**
   * Node.js >= 20.0.0
   * Pi Coding Agent (`pi`) and Gentle AI (`npm:gentle-pi`) installed.
+  * `moshi-hook` (optional, only if using Moshi mobile app).
 * **OpenCode Go Cookie Discovery:**
   * Reads `~/.mozilla/firefox/` directly.
   * Chromium on Linux uses either plaintext SQLite or libsecret/kwallet depending on the desktop environment.

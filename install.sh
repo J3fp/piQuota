@@ -195,10 +195,17 @@ case ":$PATH:" in
   *) warn "$BIN_DIR is not on PATH; add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
 
-if [[ -f "$HOME/.local/state/moshi/secrets.json" ]]; then
-  ok "moshi-hook pairing detected (\`piquota moshi push\` ready)"
+# --- Moshi Detection ---
+if command -v moshi-hook >/dev/null 2>&1; then
+  MOSHI_VER="$(moshi-hook version 2>/dev/null | head -1 || echo "detected")"
+  ok "moshi-hook found: $MOSHI_VER"
+  if [[ -f "$HOME/.local/state/moshi/secrets.json" ]]; then
+    ok "moshi-hook paired with host secret (\`piquota moshi push\` ready)"
+  else
+    warn "moshi-hook found but not paired yet; run \`moshi-hook pair\` to link your mobile app"
+  fi
 else
-  log "moshi-hook not paired; \`piquota moshi artifact\` generates local JSON snapshots"
+  log "moshi-hook not installed (optional — needed only if syncing to the Moshi mobile app: https://getmoshi.app)"
 fi
 
 if compgen -G "/mnt/c/Users/*/AppData/Roaming/Mozilla/Firefox/Profiles/*/cookies.sqlite" >/dev/null 2>&1 \
