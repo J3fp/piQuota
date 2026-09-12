@@ -146,10 +146,15 @@ fed by something else is harder to reason about than an honestly separate one.
 
 Two mechanisms keep the cards from flickering:
 
-* **Decoupled cadence.** `moshi watch --interval 60 --fetch-ttl 300` pushes every
-  minute but only refetches every five. Polling Anthropic's usage endpoint once a
-  minute makes it answer `429`, which is how a card disappears for a reason that
-  has nothing to do with the provider being exhausted.
+* **Per-family cadence.** `src/refresh.js` gives each family its own clock: Claude
+  refetches every 300 s, the other three every 60 s, and the watcher pushes every
+  30 s. A single shared clock — the previous behaviour — meant refetching everything
+  every 300 s and re-pushing the same numbers five times in between, so a card could
+  show a five-minute-old value while looking freshly published.
+  The split exists because polling Anthropic's usage endpoint once a minute makes it
+  answer `429`, which is how a card disappears for a reason that has nothing to do
+  with the provider being exhausted. Anthropic therefore sees exactly the same number
+  of requests as before; only the other providers get fresher.
 * **Sticky snapshots.** When a fresh fetch fails *transiently* (`429`, `5xx`,
   timeout, network), the previous good snapshot is republished and the report
   carries a `reused the previous snapshot for: <family>` warning. A permanent

@@ -36,7 +36,8 @@ shuvquota, and it never writes to a credential file.
 
   | Path | What |
   | --- | --- |
-  | `~/.cache/pi-quota/usage.json` | the report cache (60 s TTL) |
+  | `~/.cache/pi-quota/usage.json` | the report cache |
+| `~/.cache/pi-quota/refresh-state.json` | each family's own refresh clock |
   | `~/.cache/pi-quota/last-published.json`, `last-good.json`, `backoff.json` | sticky snapshots and throttle state |
   | `~/.local/state/pi-quota/moshi-usage.json` | the local Moshi-shaped artifact |
   | `~/.local/state/pi-quota/moshi-takeover.json` | only after `piquota moshi takeover` |
@@ -152,7 +153,7 @@ piquota auth opencode --wait 300
 
 piquota moshi status            # pairing, publisher mode and usage-collection state
 piquota moshi push              # publish once to the paired host, then exit
-piquota moshi watch             # publish every 60s, refetch every 300s
+piquota moshi watch             # publish every 30s, refetch every 60s (Claude: 300s)
 piquota moshi artifact          # write the local JSON artifact (--print for stdout)
 piquota moshi service install|uninstall|status
 piquota moshi takeover          # make these cards the only ones on the host
@@ -279,13 +280,31 @@ collection off, `moshi watch` pauses instead of pushing behind your back. The on
 exception is an explicit takeover, which is recorded rather than inferred — see
 [Taking over from moshi-hook's own poller](docs/MOSHI.md#taking-over-from-moshi-hooks-own-poller).
 
-`piquota moshi watch` decouples the two cadences: it **pushes every 60s** but only
-**refetches every 300s** (`--fetch-ttl`), so the provider APIs are not polled once
-per push. That matters in practice: Anthropic's usage endpoint starts answering
-`429` if it is polled every minute, and a card would drop off the screen because
-of a transient error. On top of that, a transient failure keeps the previous
-snapshot instead of degrading (`src/moshi/sticky.js`); a *permanent* one (expired
-sign-in, missing credential) is never masked.
+### Each provider refreshes on its own clock
+
+One shared clock was making the cards look stale: the watcher refetched everything
+every 300 s and re-pushed the same numbers five times in between, so a value could be
+five minutes old while looking freshly published.
+
+The slow clock exists for exactly one provider. Anthropic's usage endpoint answers
+`429` when it is polled every minute; Codex, Antigravity and OpenCode Go are happy at
+a minute. So:
+
+| | Clock |
+| --- | --- |
+| Claude | **300 s** (`--claude-ttl`) |
+| Codex, Antigravity, OpenCode Go | **60 s** (`--fetch-ttl`) |
+| Push to Moshi | **30 s** (`--interval`) |
+
+`src/refresh.js` keeps a timestamp per family, requests only what is past its own
+clock, and merges the result back into the one canonical report every other surface
+reads. **Anthropic sees the same number of requests as before** — only the other
+three get fresher. `--claude-ttl` is there to tune it if your account tolerates more.
+
+A short clock is safe because a throttle is already handled twice over: `backoff.js`
+pauses that family for at least five minutes after a `429`, and `src/moshi/sticky.js`
+keeps the card showing its last real reading instead of going blank. A *permanent*
+failure (expired sign-in, missing credential) is never masked.
 
 `piquota moshi service install` runs `moshi watch` as a systemd **user** service
 (`pi-quota-moshi.service`). Full protocol notes, including how the endpoint and
@@ -313,7 +332,8 @@ src/moshi/daemon.js            daemon restart, and proof of the value it loaded
 src/engine.js                  collectQuota() -> one normalized report
 src/model.js                   window normalization, percent and reset parsing
 src/render/{theme,panel}.js    colors, thresholds, rings, bars, boxed panel
-src/cache.js                   60s TTL cache at ~/.cache/pi-quota/usage.json
+src/cache.js                   report cache at ~/.cache/pi-quota/usage.json
+src/refresh.js                 per-family refresh clocks, and the merge back into one report
 src/cli/args.js                argument parsing, and the flag/positional split
 src/exec.js                    the one place that spawns a foreign binary
 src/http.js                    fetch wrapper: timeouts, JSON, redaction
@@ -346,7 +366,7 @@ extensions/moshi-approvals.ts  mirrors Pi's approval prompts to the phone
 ## Tests
 
 ```bash
-node --test tests/*.test.mjs     # 166 tests, fake tokens only, no network
+node --test tests/*.test.mjs     # 182 tests, fake tokens only, no network
 ```
 
 Modules covered: `auth.json` parsing and de-duplication, the Claude Code store
@@ -356,8 +376,8 @@ Antigravity failures and the OpenCode degradation), the dashboard parser's three
 strategies, the Firefox cookie reader against a synthetic SQLite database, the
 Antigravity refresh (in-memory only), the Moshi takeover and daemon-restart
 helpers, the Moshi payload/redaction/transport, the renderers, the Pi
-extension contract, the approval mirror (through a real Unix socket), and argument
-parsing including the two silent defects it once hid.
+extension contract, the approval mirror (through a real Unix socket), the per-family
+refresh clocks, and argument parsing including the two silent defects it once hid.
 
 ## Acknowledgments & Prior Art
 

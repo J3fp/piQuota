@@ -33,6 +33,7 @@ import { OPENCODE_COOKIE_NAME, configPaths, discoverWorkspaceId, readGoPlan, res
 import { buildUsagePayload, discoverBaseUrl, moshiPaths, pushUsage, readHostCredentials } from "../src/moshi/client.js";
 import { buildArtifact, resolveArtifactPath, writeArtifact } from "../src/moshi/artifact.js";
 import { effectiveUsageCollection, readUsageCollection } from "../src/moshi/settings.js";
+import { CLAUDE_TTL_SEC, collectWithCadence, resolveFamilyTtls } from "../src/refresh.js";
 import { clearTakeover, readTakeover, setMoshiUsageCollection, writeTakeover } from "../src/moshi/takeover.js";
 import { confirmDaemonUsageCollection, resolveHookLogPath, restartMoshiDaemon } from "../src/moshi/daemon.js";
 import { describeClaudeCodeSource } from "../src/auth/claude-code-auth.js";
@@ -91,8 +92,9 @@ Auth (OpenCode Go session, the only credential Pi does not store):
 
 Moshi:
   piquota moshi push               publish once to the paired host channel
-  piquota moshi watch              publish every --interval seconds (default 60),
-                                   refetching every --fetch-ttl seconds (default 300)
+  piquota moshi watch              publish every --interval seconds (default 30)
+                                   refetch every --fetch-ttl seconds (default 60)
+                                   Claude refetches every --claude-ttl seconds (default 300)
   piquota moshi artifact           write the local artifact (--print to stdout)
   piquota moshi status             pairing, publisher mode and usage-collection state
   piquota moshi service install    run \`moshi watch\` as a systemd user service
@@ -554,12 +556,16 @@ async function moshiPublisher(action) {
  */
 async function moshiWatch(argv, report, options = {}) {
   const intervalIndex = argv.indexOf("--interval");
-  const intervalSec = intervalIndex >= 0 ? Number(argv[intervalIndex + 1]) || 60 : 60;
+  const intervalSec = intervalIndex >= 0 ? Number(argv[intervalIndex + 1]) || 30 : 30;
   const ttlIndex = argv.indexOf("--fetch-ttl");
-  const fetchTtlSec = ttlIndex >= 0 ? Number(argv[ttlIndex + 1]) || 300 : 300;
+  const fetchTtlSec = ttlIndex >= 0 ? Number(argv[ttlIndex + 1]) || 60 : 60;
+  const claudeTtlIndex = argv.indexOf("--claude-ttl");
+  const claudeTtlSec = claudeTtlIndex >= 0 ? Number(argv[claudeTtlIndex + 1]) || CLAUDE_TTL_SEC : CLAUDE_TTL_SEC;
 
-  out(`moshi watch: publishing every ${intervalSec}s, refetching every ${fetchTtlSec}s (Ctrl-C to stop)`);
-  out("  (the two are decoupled so the provider APIs are not polled once per push)");
+  const ttls = resolveFamilyTtls({ defaultTtlSec: fetchTtlSec, claudeTtlSec });
+  out(`moshi watch: publishing every ${intervalSec}s, refetching every ${ttls.codex}s (Ctrl-C to stop)`);
+  out(`  Claude refetches every ${ttls.claude}s on its own clock: it is the one provider that`);
+  out("  answers 429 when its usage endpoint is polled every minute.");
 
   let last = loadLastPublished({});
   for (;;) {
@@ -567,23 +573,32 @@ async function moshiWatch(argv, report, options = {}) {
     if (!setting.enabled) {
       out(`usage-collection is off in ${setting.path}; pausing`);
     } else {
-      const fetched = await withCache({ ttlMs: fetchTtlSec * 1000 }, () =>
-        collectQuota({ families: FAMILIES, refresh: options.refresh }),
-      );
+      const fetched = await collectWithCadence({
+        families: FAMILIES,
+        ttls,
+        loader: (families) => collectQuota({ families, refresh: options.refresh }),
+      });
       const carried = mergeSticky(last, fetched.report);
       const final = mergeLastGood(carried.report);
       last = final.report;
 
       const result = await moshiPush(final.report, { agentMode: options.agentMode, quiet: true, alreadyMerged: true });
       const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-      const ok = final.report.providers.filter((provider) => provider.ok).length;
       const carriedNames = [...carried.reused, ...final.restored];
-      const note = carriedNames.length > 0
-        ? ` (carried: ${carriedNames.join(", ")})`
-        : fetched.cached
-          ? " (cached)"
-          : "";
-      out(result === 0 ? `${stamp} published ${ok} provider(s)${note}` : `${stamp} push failed`);
+      const notes = [];
+      if (fetched.fetched.length > 0) notes.push(`refreshed ${fetched.fetched.join(", ")}`);
+      if (carriedNames.length > 0) notes.push(`kept last values for ${carriedNames.join(", ")}`);
+      const note = notes.length > 0 ? ` (${notes.join("; ")})` : "";
+
+      if (result === 0) {
+        // What matters is how many cards the host accepted, not how many providers
+        // happened to be healthy: a cycle where the sticky layer restored three of
+        // four still published four, and the old message reported "1".
+        const pushed = buildUsagePayload(final.report, { agentMode: options.agentMode }).snapshots.length;
+        out(`${stamp} published ${pushed} card(s)${note}`);
+      } else {
+        out(`${stamp} push failed${note}`);
+      }
     }
     await sleep(intervalSec);
   }
@@ -612,7 +627,7 @@ After=moshi-hook.service
 
 [Service]
 Type=simple
-ExecStart=${process.execPath} ${cli} moshi watch --interval 60
+ExecStart=${process.execPath} ${cli} moshi watch --interval 30 --fetch-ttl 60
 Restart=always
 RestartSec=15
 
@@ -626,10 +641,21 @@ WantedBy=default.target
     }
     out(`wrote ${unitPath}`);
     spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
+    // `enable --now` starts a stopped unit and leaves a running one alone, so an
+    // upgrade would keep the old binary and the old cadence until the next reboot.
+    const wasActive = spawnSync("systemctl", ["--user", "is-active", SERVICE_NAME], { encoding: "utf-8" }).stdout?.trim() === "active";
     const enabled = spawnSync("systemctl", ["--user", "enable", "--now", SERVICE_NAME], { stdio: "inherit" });
     if (enabled.status !== 0) {
       err("systemctl enable failed; run it manually");
       return 1;
+    }
+    if (wasActive) {
+      const restarted = spawnSync("systemctl", ["--user", "restart", SERVICE_NAME], { stdio: "inherit" });
+      if (restarted.status !== 0) {
+        err(`the unit is written, but the running service could not be restarted; run: systemctl --user restart ${SERVICE_NAME}`);
+        return 1;
+      }
+      out("service restarted so the new unit takes effect");
     }
     out("service enabled and started");
     return 0;
