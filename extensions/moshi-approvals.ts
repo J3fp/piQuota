@@ -246,10 +246,42 @@ export default function moshiApprovals(pi: ExtensionAPI): void {
   // pick up the terminal it is actually running in.
   const terminalContext = resolveTerminalContext();
   let session = emptySession();
+  let ui: { setWorkingIndicator(options?: { frames?: string[]; intervalMs?: number }): void } | undefined;
+  // Set while a mirrored permission request is waiting: only the freeze that this
+  // instance applied is restored, never a state another extension chose.
+  let frozeIndicator = false;
+
+  /**
+   * While a permission prompt is waiting, Pi's animated working indicator keeps
+   * redrawing the pane, so the daemon's screen fingerprint taken when the card was
+   * published no longer matches at tap time and remote approval fails verification.
+   * A static indicator keeps the pane visually frozen for that window.
+   */
+  const freezeWorkingIndicator = (): void => {
+    if (!ui || frozeIndicator) return;
+    try {
+      ui.setWorkingIndicator({ frames: ["·"] });
+      frozeIndicator = true;
+    } catch {
+      // The freeze is an optimization for remote approval, never a guarantee.
+    }
+  };
+
+  const thawWorkingIndicator = (): void => {
+    if (!ui || !frozeIndicator) return;
+    frozeIndicator = false;
+    try {
+      ui.setWorkingIndicator();
+    } catch {
+      // Nothing to restore to if the mode never supported the freeze.
+    }
+  };
 
   const remember = (_event: unknown, ctx: unknown): void => {
     try {
       const ctxObj = ctx && typeof ctx === "object" ? (ctx as Record<string, unknown>) : {};
+      const candidateUi = ctxObj.ui as typeof ui | undefined;
+      if (candidateUi && typeof candidateUi.setWorkingIndicator === "function") ui = candidateUi;
       session = {
         sessionId: sessionIDFrom(ctxObj) || session.sessionId,
         transcriptPath: transcriptPathFrom(ctxObj) || session.transcriptPath,
@@ -266,7 +298,9 @@ export default function moshiApprovals(pi: ExtensionAPI): void {
   pi.on("before_agent_start", remember);
   pi.on("agent_start", remember);
   pi.on("session_shutdown", () => {
-    // A closed session must not be reused by a later approval.
+    // A closed session must not be reused by a later approval, and a pane left
+    // frozen by an unanswered prompt must not stay frozen past its session.
+    thawWorkingIndicator();
     session = emptySession();
   });
 
@@ -323,6 +357,7 @@ export default function moshiApprovals(pi: ExtensionAPI): void {
       if (!requestId || (state !== "waiting" && state !== "approved" && state !== "denied")) return;
 
       if (state === "waiting") {
+        freezeWorkingIndicator();
         sendEnvelope(
           envelopeFor("PermissionRequest", {
             actionId: requestId,
@@ -331,8 +366,8 @@ export default function moshiApprovals(pi: ExtensionAPI): void {
             toolName,
             title: agentDisplayName + " needs approval",
             // Remote approval only lands when the daemon can re-find this prompt on
-            // screen, which it does about one time in eight. The card never promises
-            // more than that.
+            // screen; the frozen indicator is what keeps the pane stable enough for
+            // that, but the card never promises more than the terminal fallback.
             subtitle: "Answer in terminal",
             message: firstString(payload.message).trim().replace(/\s+/g, " ").slice(0, 256),
           }),
@@ -340,6 +375,7 @@ export default function moshiApprovals(pi: ExtensionAPI): void {
         return;
       }
 
+      thawWorkingIndicator();
       sendEnvelope(
         envelopeFor("PermissionResolved", {
           actionId: requestId,

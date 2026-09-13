@@ -308,5 +308,93 @@ test("session_shutdown drops the cached session so a later approval cannot reuse
 
 });
 
+/**
+ * The freeze/thaw pair that keeps the pane static while a mirrored prompt waits:
+ * without it the animated working indicator invalidates the daemon's screen
+ * fingerprint and remote approval fails verification.
+ *
+ * @returns {{ ui: Record<string, unknown>, calls: Array<Record<string, any> | undefined> }}
+ */
+function makeUi() {
+  /** @type {Array<Record<string, any> | undefined>} */
+  const calls = [];
+  return {
+    ui: { setWorkingIndicator: (options) => calls.push(options) },
+    calls,
+  };
+}
+
+test("a waiting prompt freezes the working indicator and a resolution restores it", async (t) => {
+  const server = await makeSocketServer();
+  t.after(() => server.close());
+  const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
+  const { ui, calls } = makeUi();
+  await loaded.handlers.get("session_start")({}, { ...loaded.ctx, ui });
+  const listener = loaded.listeners.get(PERMISSION_EVENT);
+
+  await listener({ requestId: "req-f1", state: "waiting", toolName: "bash" });
+  await listener({ requestId: "req-f1", state: "approved", toolName: "bash" });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  assert.equal(calls.length, 2, "exactly one freeze and one restore");
+  assert.deepEqual(calls[0], { frames: ["·"] }, "the indicator must stop animating while the prompt waits");
+  assert.equal(calls[1], undefined, "the restore must go back to the default indicator");
+
+});
+
+test("overlapping waiting prompts freeze once, and only one restore is issued", async (t) => {
+  const server = await makeSocketServer();
+  t.after(() => server.close());
+  const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
+  const { ui, calls } = makeUi();
+  await loaded.handlers.get("session_start")({}, { ...loaded.ctx, ui });
+  const listener = loaded.listeners.get(PERMISSION_EVENT);
+
+  await listener({ requestId: "req-f2", state: "waiting", toolName: "bash" });
+  await listener({ requestId: "req-f3", state: "waiting", toolName: "bash" });
+  await listener({ requestId: "req-f2", state: "denied", toolName: "bash" });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  assert.equal(calls.length, 2, "a second freeze must not stack on the first");
+
+});
+
+test("session_shutdown thaws a pane a resolution never reached", async (t) => {
+  const server = await makeSocketServer();
+  t.after(() => server.close());
+  const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
+  const { ui, calls } = makeUi();
+  await loaded.handlers.get("session_start")({}, { ...loaded.ctx, ui });
+  const listener = loaded.listeners.get(PERMISSION_EVENT);
+
+  await listener({ requestId: "req-f4", state: "waiting", toolName: "bash" });
+  await loaded.handlers.get("session_shutdown")({}, loaded.ctx);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1], undefined, "the shutdown must restore the default indicator");
+
+});
+
+test("a missing or throwing ui surface never interrupts the approval mirror", async (t) => {
+  const server = await makeSocketServer();
+  t.after(() => server.close());
+  const loaded = await load({ MOSHI_SOCKET_PATH: server.path });
+  t.after(() => loaded.restore());
+  const { calls } = makeUi();
+  await loaded.handlers.get("session_start")({}, { ...loaded.ctx, ui: { setWorkingIndicator: () => { throw new Error("no ui"); } } });
+  const listener = loaded.listeners.get(PERMISSION_EVENT);
+
+  assert.doesNotThrow(() => listener({ requestId: "req-f5", state: "waiting", toolName: "bash" }));
+  assert.doesNotThrow(() => listener({ requestId: "req-f5", state: "approved", toolName: "bash" }));
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  assert.equal(server.received.length, 2, "the envelopes still go out");
+  assert.equal(calls.length, 0);
+
+});
 
 
