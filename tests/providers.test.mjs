@@ -199,3 +199,55 @@ test("a throttled family is paused instead of hammered, and recovers", async () 
   assert.equal(backoffState("claude", { now: NOW + 400_000, home: dir }).active, false);
   assert.equal(clearBackoff("claude", { home: dir }), false);
 });
+
+test("auth failures supersede throttling: isAuthFailure and backoff clearing", async () => {
+  const { isAuthFailure, recordBackoff, backoffState } = await import("../src/providers/backoff.js");
+  const { collectQuota } = await import("../src/engine.js");
+  const { fileURLToPath } = await import("node:url");
+  const FIXTURE = fileURLToPath(new URL("./fixtures/fake-auth.json", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "pi-quota-auth-priority-"));
+  const NOW = 1_800_000_000_000;
+
+  assert.equal(isAuthFailure("sign-in expired (HTTP 401)"), true);
+  assert.equal(isAuthFailure("Claude Code token expired or rejected; run `claude` once to refresh it"), true);
+  assert.equal(isAuthFailure("HTTP 403: Forbidden"), true);
+  assert.equal(isAuthFailure("rate limited (HTTP 429)"), false);
+  assert.equal(isAuthFailure("timed out after 15000ms"), false);
+  assert.equal(isAuthFailure(null), false);
+
+  // Set an active backoff for claude
+  recordBackoff("claude", { retryAfterSec: 600, now: NOW, home: dir });
+  assert.equal(backoffState("claude", { now: NOW, home: dir }).active, true);
+
+  // When fetch encounters a 401 (auth failure), backoff must be cleared immediately
+  const fetchFn = /** @type {typeof fetch} */ (async () => {
+    return new Response(JSON.stringify({ error: { message: "OAuth token expired" } }), {
+      status: 401,
+      statusText: "Unauthorized",
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  // Call with now = 1_900_000_000_000 where the token in FIXTURE (expires 1_893_456_000_000) is expired:
+  // it must clear the throttle upfront and run the check
+  const EXPIRED_NOW = 1_900_000_000_000;
+  recordBackoff("claude", { retryAfterSec: 600, now: EXPIRED_NOW, home: dir });
+  assert.equal(backoffState("claude", { now: EXPIRED_NOW, home: dir }).active, true);
+
+  const result = await collectQuota({
+    paths: [FIXTURE],
+    claudeCodePaths: [],
+    families: ["claude"],
+    now: EXPIRED_NOW,
+    fetchFn,
+    env: {},
+    stores: [],
+    allowBrowser: false,
+    home: dir,
+  });
+
+  // Backoff must now be inactive because expired credential cleared it upfront
+  assert.equal(backoffState("claude", { now: EXPIRED_NOW, home: dir }).active, false);
+  assert.equal(result.providers[0].ok, false);
+  assert.match(result.providers[0].error ?? "", /expired|rejected/i);
+});

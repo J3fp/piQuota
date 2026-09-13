@@ -117,6 +117,19 @@ export function isThrottled(error) {
 }
 
 /**
+ * True when an error represents an authentication or credential failure rather than
+ * a rate-limiting throttle. Authentication failures supersede throttling because
+ * waiting out a backoff window cannot fix an expired or invalid credential.
+ *
+ * @param {string | null} error
+ * @returns {boolean}
+ */
+export function isAuthFailure(error) {
+  if (!error || typeof error !== "string") return false;
+  return /401|403|unauthorized|forbidden|token expired|sign-in expired|expired or rejected|re-authenticate|invalid_grant|no .*access token/i.test(error);
+}
+
+/**
  * Extract a retry hint from an error string such as "retry in 212s".
  *
  * @param {string | null} error

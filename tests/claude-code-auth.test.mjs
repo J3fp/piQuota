@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,7 +17,9 @@ import {
   claudeCodeCandidatePaths,
   describeClaudeCodeSource,
   loadClaudeCodeCredential,
+  OAUTH_REFRESH_LOCK_NAME,
   readClaudeCodeProfile,
+  recoverStaleClaudeLock,
   resolveClaudeCodeCredentialPaths,
 } from "../src/auth/claude-code-auth.js";
 
@@ -214,3 +216,35 @@ test("describeClaudeCodeSource explains an empty search without throwing", () =>
   assert.deepEqual(described.paths, []);
   assert.match(described.error, /Claude Code/);
 });
+
+test("an abandoned .oauth_refresh.lock is automatically cleaned up when stale", () => {
+  const { home, usersRoot } = makeClaudeCodeHome();
+  const claudeDir = join(home, ".claude");
+  const lockDir = join(claudeDir, OAUTH_REFRESH_LOCK_NAME);
+  mkdirSync(lockDir);
+  // Set mtime to 10 minutes ago
+  const tenMinutesAgo = (Date.now() - 600_000) / 1000;
+  utimesSync(lockDir, tenMinutesAgo, tenMinutesAgo);
+
+  assert.equal(existsSync(lockDir), true);
+
+  const loaded = loadClaudeCodeCredential({ home, usersRoot, env: {}, platform: "linux" });
+  assert.equal(loaded.ok, true);
+  assert.equal(loaded.recoveredLock?.recovered, true);
+  assert.equal(existsSync(lockDir), false, "the stale lock directory must be deleted");
+});
+
+test("a recent .oauth_refresh.lock (< staleMs) is not removed", () => {
+  const { home, usersRoot } = makeClaudeCodeHome();
+  const claudeDir = join(home, ".claude");
+  const lockDir = join(claudeDir, OAUTH_REFRESH_LOCK_NAME);
+  mkdirSync(lockDir);
+
+  assert.equal(existsSync(lockDir), true);
+
+  const loaded = loadClaudeCodeCredential({ home, usersRoot, env: {}, platform: "linux", staleMs: 120_000 });
+  assert.equal(loaded.ok, true);
+  assert.equal(loaded.recoveredLock, null);
+  assert.equal(existsSync(lockDir), true, "a fresh lock must be preserved");
+});
+

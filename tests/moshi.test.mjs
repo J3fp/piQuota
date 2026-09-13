@@ -290,6 +290,46 @@ test("a throttled family keeps showing its last known real values", async () => 
   const third = mergeLastGood({ ...report([expired]), byFamily: { claude: [expired] } }, { path, now: NOW + 13 * 60_000 });
   assert.deepEqual(third.restored, []);
   assert.equal(third.report.providers[0].ok, false);
+
+  // A snapshot older than the max sticky age (default 30m) is discarded.
+  const fourth = mergeLastGood(
+    { ...report([throttled]), byFamily: { claude: [throttled] } },
+    { path, now: NOW + 35 * 60_000 },
+  );
+  assert.deepEqual(fourth.restored, [], "must not restore data older than max sticky age");
+  assert.equal(fourth.report.providers[0].ok, false);
+  assert.match(fourth.report.warnings.join(" "), /discarded last known values because they are stale/);
+});
+
+test("an expired credential (expiresInMin <= 0) is never masked by mergeLastGood or mergeSticky", async () => {
+  const { mergeLastGood, mergeSticky } = await import("../src/moshi/sticky.js");
+  const dir = mkdtempSync(join(tmpdir(), "pi-quota-expired-"));
+  const path = join(dir, "last-good.json");
+  const NOW = 1_800_000_000_000;
+
+  const healthy = provider({ family: "claude", label: "Claude (Pi)" });
+  const previous = { ...report([healthy]), byFamily: { claude: [healthy] } };
+  mergeLastGood(previous, { path, now: NOW });
+
+  // A result where the token expired, but the error message is transient (e.g. backing off)
+  const expiredBackingOff = provider({
+    family: "claude",
+    label: "Claude (Pi)",
+    ok: false,
+    windows: [],
+    expiresInMin: -10,
+    error: "backing off after a throttle: next attempt in 120s",
+  });
+  const current = { ...report([expiredBackingOff]), byFamily: { claude: [expiredBackingOff] } };
+
+  // Neither mergeSticky nor mergeLastGood should restore old data when the token is expired
+  const stickyResult = mergeSticky(previous, current, { now: NOW + 60_000 });
+  assert.deepEqual(stickyResult.reused, []);
+  assert.equal(stickyResult.report.providers[0].ok, false);
+
+  const lastGoodResult = mergeLastGood(current, { path, now: NOW + 60_000 });
+  assert.deepEqual(lastGoodResult.restored, []);
+  assert.equal(lastGoodResult.report.providers[0].ok, false);
 });
 
 test("a backoff message still restores the last known values", async () => {

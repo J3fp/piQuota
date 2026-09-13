@@ -18,9 +18,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /** Windows-side profiles reachable from WSL, discovered without spawning cmd.exe. */
 const WINDOWS_USERS_ROOT = "/mnt/c/Users";
@@ -30,6 +30,8 @@ const CREDENTIALS_NAME = ".credentials.json";
 const PROFILE_NAME = ".claude.json";
 
 export const DEFAULT_LABEL = "Claude (Pi)";
+export const OAUTH_REFRESH_LOCK_NAME = ".oauth_refresh.lock";
+export const DEFAULT_STALE_LOCK_MS = 120_000;
 
 /**
  * @param {string} value
@@ -232,6 +234,49 @@ function missingMessage(path) {
 }
 
 /**
+ * Detect and recover from an abandoned Claude Code OAuth refresh lock.
+ *
+ * Claude Code creates `.oauth_refresh.lock` only for the few seconds it takes to
+ * rotate its tokens with Anthropic. If the CLI is interrupted or killed mid-refresh,
+ * that directory remains and causes all future refreshes to fail with:
+ * "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh."
+ *
+ * Any lock older than `staleMs` (default 2 minutes) is safely treated as abandoned,
+ * as Claude Code's own internal lock expiration threshold is 60 seconds.
+ *
+ * @param {string} configDir
+ * @param {{ now?: number, staleMs?: number }} [options]
+ * @returns {{ recovered: boolean, lockPath: string, ageMs?: number, error?: string }}
+ */
+export function recoverStaleClaudeLock(configDir, options = {}) {
+  const lockPath = join(configDir, OAUTH_REFRESH_LOCK_NAME);
+  if (!existsSync(lockPath)) return { recovered: false, lockPath };
+
+  const now = options.now ?? Date.now();
+  const staleMs = options.staleMs ?? DEFAULT_STALE_LOCK_MS;
+
+  try {
+    const stat = statSync(lockPath);
+    const ageMs = Math.max(0, now - stat.mtimeMs);
+    if (ageMs < staleMs) {
+      return { recovered: false, lockPath, ageMs };
+    }
+    try {
+      rmdirSync(lockPath);
+    } catch {
+      rmSync(lockPath, { recursive: true, force: true });
+    }
+    return { recovered: true, lockPath, ageMs };
+  } catch (error) {
+    return {
+      recovered: false,
+      lockPath,
+      error: /** @type {{ message?: string }} */ (error)?.message ?? String(error),
+    };
+  }
+}
+
+/**
  * Normalize the Claude Code store into the same credential shape `pi-auth.js`
  * produces, so every downstream surface treats both Claude sources identically.
  *
@@ -246,7 +291,12 @@ export function loadClaudeCodeCredential(options = {}) {
   }
 
   let lastError = null;
+  let recoveredLock = null;
   for (const path of paths) {
+    if (options.recoverStaleLock !== false) {
+      const recovery = recoverStaleClaudeLock(dirname(path), { now: options.now, staleMs: options.staleMs });
+      if (recovery.recovered) recoveredLock = recovery;
+    }
     const read = readClaudeCodeCredentialFile(path);
     if (!read.ok) {
       lastError = read.error;
@@ -255,7 +305,7 @@ export function loadClaudeCodeCredential(options = {}) {
 
     const access = text(read.oauth.accessToken);
     if (!access) {
-      return { ok: false, credential: null, error: `no Claude Code access token in ${path}; run \`claude\` once to sign in`, paths };
+      return { ok: false, credential: null, error: `no Claude Code access token in ${path}; run \`claude\` once to sign in`, paths, recoveredLock };
     }
 
     const profile = readClaudeCodeProfile(options);
@@ -264,6 +314,7 @@ export function loadClaudeCodeCredential(options = {}) {
     return {
       ok: true,
       paths,
+      recoveredLock,
       credential: {
         provider: "claude-code",
         family: "claude",
@@ -285,7 +336,7 @@ export function loadClaudeCodeCredential(options = {}) {
     };
   }
 
-  return { ok: false, credential: null, error: lastError ?? missingMessage(claudeCodeCandidatePaths(options)[0]), paths };
+  return { ok: false, credential: null, error: lastError ?? missingMessage(claudeCodeCandidatePaths(options)[0]), paths, recoveredLock };
 }
 
 /**
@@ -297,14 +348,30 @@ export function loadClaudeCodeCredential(options = {}) {
 export function describeClaudeCodeSource(options = {}) {
   const paths = options.paths ?? resolveClaudeCodeCredentialPaths(options);
   const path = paths[0] ?? null;
+  const configDir = path ? dirname(path) : resolveClaudeConfigDir(options);
+  const lockPath = join(configDir, OAUTH_REFRESH_LOCK_NAME);
+  let hasStaleLock = false;
+  let lockAgeSec = null;
+  if (existsSync(lockPath)) {
+    try {
+      const stat = statSync(lockPath);
+      const ageMs = (options.now ?? Date.now()) - stat.mtimeMs;
+      lockAgeSec = Math.max(0, Math.round(ageMs / 1000));
+      hasStaleLock = ageMs >= (options.staleMs ?? DEFAULT_STALE_LOCK_MS);
+    } catch {
+      // Degrade gracefully if stat fails
+    }
+  }
 
-  /** @type {{ ok: boolean, paths: string[], path: string | null, hasAccessToken: boolean, hasRefreshToken: boolean, expiresInMin: number | null, plan: string | null, error: string | null }} */
+  /** @type {{ ok: boolean, paths: string[], path: string | null, hasAccessToken: boolean, hasRefreshToken: boolean, hasStaleLock: boolean, lockAgeSec: number | null, expiresInMin: number | null, plan: string | null, error: string | null }} */
   const described = {
     ok: path !== null,
     paths,
     path,
     hasAccessToken: false,
     hasRefreshToken: false,
+    hasStaleLock,
+    lockAgeSec,
     expiresInMin: null,
     plan: null,
     error: path === null ? missingMessage(claudeCodeCandidatePaths(options)[0]) : null,

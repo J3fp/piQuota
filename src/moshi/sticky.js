@@ -45,16 +45,21 @@ const TRANSIENT =
  */
 export function isTransientError(error) {
   if (!error) return false;
+  if (isAuthFailure(error)) return false;
   return TRANSIENT.test(error);
 }
 
 /**
  * @param {import("../engine.js").PiQuotaReport | null} previous
  * @param {import("../engine.js").PiQuotaReport} next
+ * @param {{ now?: number, maxAgeMs?: number }} [options]
  * @returns {{ report: import("../engine.js").PiQuotaReport, reused: string[] }}
  */
-export function mergeSticky(previous, next) {
+export function mergeSticky(previous, next, options = {}) {
   if (!previous) return { report: next, reused: [] };
+  const nextTime = next.generatedAt ? Date.parse(next.generatedAt) : NaN;
+  const now = options.now ?? (!Number.isNaN(nextTime) ? nextTime : Date.now());
+  const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_STICKY_AGE_MS;
 
   /** @type {string[]} */
   const reused = [];
@@ -66,12 +71,18 @@ export function mergeSticky(previous, next) {
   for (const [family, results] of Object.entries(next.byFamily)) {
     const fresh = results[0];
     const prior = previous.byFamily[family]?.[0];
+    const priorTimestamp = prior?.updatedAt ? Date.parse(prior.updatedAt) : NaN;
+    const isPriorFresh = Number.isNaN(priorTimestamp) || now - priorTimestamp <= maxAgeMs;
+    const hasExpiredToken = fresh?.expiresInMin !== null && fresh?.expiresInMin !== undefined && fresh.expiresInMin <= 0;
     const keepPrior =
       fresh &&
       prior &&
       !fresh.ok &&
       prior.ok &&
       prior.windows.length > 0 &&
+      !hasExpiredToken &&
+      !isAuthFailure(fresh.error) &&
+      isPriorFresh &&
       isTransientError(fresh.error);
 
     if (!keepPrior) {
@@ -116,6 +127,11 @@ export function mergeSticky(previous, next) {
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+import { isAuthFailure } from "../providers/backoff.js";
+
+/** Maximum age for a sticky / last-good snapshot before it is considered stale (30 minutes). */
+export const DEFAULT_MAX_STICKY_AGE_MS = 30 * 60 * 1000;
 
 /**
  * @param {{ env?: Record<string, string | undefined>, home?: string, path?: string }} [options]
@@ -232,6 +248,7 @@ function writeLastGood(state, options = {}) {
  */
 export function mergeLastGood(report, options = {}) {
   const now = options.now ?? Date.now();
+  const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_STICKY_AGE_MS;
   const state = readLastGood(options);
 
   /** @type {string[]} */
@@ -255,8 +272,22 @@ export function mergeLastGood(report, options = {}) {
     }
 
     const stored = state[family];
-    const canRestore = stored?.result?.ok && stored.result.windows.length > 0 && isTransientError(fresh?.error ?? null);
+    const ageMs = stored ? now - stored.savedAt : Infinity;
+    const isStoredFresh = ageMs <= maxAgeMs;
+    const hasExpiredToken = fresh?.expiresInMin !== null && fresh?.expiresInMin !== undefined && fresh.expiresInMin <= 0;
+    const canRestore =
+      stored?.result?.ok &&
+      stored.result.windows.length > 0 &&
+      !hasExpiredToken &&
+      !isAuthFailure(fresh?.error ?? null) &&
+      isStoredFresh &&
+      isTransientError(fresh?.error ?? null);
     if (!canRestore) {
+      if (stored?.result?.ok && !isStoredFresh && isTransientError(fresh?.error ?? null)) {
+        warnings.push(
+          `${family}: discarded last known values because they are stale (${Math.round(ageMs / 60000)} min old, limit ${Math.round(maxAgeMs / 60000)} min)`,
+        );
+      }
       byFamily[family] = results;
       continue;
     }

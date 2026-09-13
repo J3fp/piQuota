@@ -9,7 +9,7 @@
 import { checkFreshness, LABEL_BY_FAMILY, loadPiCredentials, resolveAuthPaths } from "./auth/pi-auth.js";
 import { loadClaudeCodeCredential } from "./auth/claude-code-auth.js";
 import { degradedResult, displayIdentity, selectPrimaryWindow } from "./model.js";
-import { backoffState, clearBackoff, isThrottled, recordBackoff, retryAfterFromError } from "./providers/backoff.js";
+import { backoffState, clearBackoff, isAuthFailure, isThrottled, recordBackoff, retryAfterFromError } from "./providers/backoff.js";
 import { fetchQuota as fetchClaude } from "./providers/claude.js";
 import { fetchQuota as fetchCodex } from "./providers/codex.js";
 import { fetchQuota as fetchAntigravity } from "./providers/antigravity.js";
@@ -57,7 +57,7 @@ export function resolveClaudeCredentials(input) {
   const fromPi = input.credentials.filter((credential) => credential.family === "claude");
   const claudeCodePaths = input.claudeCodePaths === undefined ? undefined : input.claudeCodePaths;
 
-  if (mode === "pi") return { credentials: fromPi, mode, unavailable: null, claudeCodePaths: claudeCodePaths ?? [] };
+  if (mode === "pi") return { credentials: fromPi, mode, unavailable: null, claudeCodePaths: claudeCodePaths ?? [], recoveredLock: null };
 
   const claudeCode = loadClaudeCodeCredential({
     env: input.env,
@@ -65,15 +65,34 @@ export function resolveClaudeCredentials(input) {
     platform: input.platform,
     usersRoot: input.usersRoot,
     paths: claudeCodePaths ?? undefined,
+    now: input.now,
   });
 
   if (claudeCode.ok) {
-    return { credentials: [claudeCode.credential], mode: "claude-code", unavailable: null, claudeCodePaths: claudeCode.paths };
+    return {
+      credentials: [claudeCode.credential],
+      mode: "claude-code",
+      unavailable: null,
+      claudeCodePaths: claudeCode.paths,
+      recoveredLock: claudeCode.recoveredLock ?? null,
+    };
   }
   if (mode === "claude-code") {
-    return { credentials: [], mode, unavailable: claudeCode.error, claudeCodePaths: claudeCode.paths };
+    return {
+      credentials: [],
+      mode,
+      unavailable: claudeCode.error,
+      claudeCodePaths: claudeCode.paths,
+      recoveredLock: claudeCode.recoveredLock ?? null,
+    };
   }
-  return { credentials: fromPi, mode: "pi", unavailable: null, claudeCodePaths: claudeCode.paths };
+  return {
+    credentials: fromPi,
+    mode: "pi",
+    unavailable: null,
+    claudeCodePaths: claudeCode.paths,
+    recoveredLock: claudeCode.recoveredLock ?? null,
+  };
 }
 
 /** @type {Record<string, (credential: any, options?: any) => Promise<import("./model.js").QuotaResult>>} */
@@ -149,6 +168,11 @@ export async function collectQuota(options = {}) {
   const byFamily = {};
   /** @type {string[]} */
   const warnings = [...loaded.warnings];
+  if (claude.recoveredLock) {
+    warnings.push(
+      `claude: removed abandoned OAuth refresh lock (${Math.round((claude.recoveredLock.ageMs ?? 0) / 1000)}s old) at ${claude.recoveredLock.lockPath}`,
+    );
+  }
 
   await Promise.all(
     families.map(async (family) => {
@@ -173,6 +197,18 @@ export async function collectQuota(options = {}) {
       // A family that is currently throttled is skipped entirely, so the
       // caller's sticky layer can republish the previous good snapshot instead
       // of adding more pressure to a rate-limited endpoint.
+      //
+      // Authentication failures supersede throttling: if any credential for this
+      // family is already known to be expired, waiting out a rate limit is useless
+      // and misleading. We clear backoff immediately so the auth failure surfaces.
+      const hasExpiredToken = credentials.some((credential) => {
+        const freshness = checkFreshness(credential, now);
+        return !freshness.fresh;
+      });
+      if (hasExpiredToken) {
+        clearBackoff(family, { env, home: options.home });
+      }
+
       const throttle = backoffState(family, { now, env, home: options.home });
       if (throttle.active) {
         byFamily[family] = [
@@ -220,7 +256,7 @@ export async function collectQuota(options = {}) {
               home: options.home,
             }).seconds;
             warnings.push(`${family}: throttled upstream; pausing that family for ${seconds}s`);
-          } else if (result.ok) {
+          } else if (result.ok || isAuthFailure(result.error)) {
             clearBackoff(family, { env, home: options.home });
           }
           results.push(result);
